@@ -1,0 +1,1007 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="ローソク足ランナー">
+<link rel="apple-touch-icon" href="assets/icon-180.png">
+<link rel="icon" type="image/png" href="assets/icon-180.png">
+<title>ローソク足ランナー 📈</title>
+<style>
+  html, body { height: 100%; margin: 0; background: #05070d; overflow: hidden; }
+  body { display: flex; align-items: center; justify-content: center; }
+  canvas { display: block; touch-action: none; }
+  #rotate { display: none; position: fixed; inset: 0; background: #05070d; color: #cfe3f5;
+    z-index: 10; align-items: center; justify-content: center; font: bold 20px sans-serif; text-align: center; }
+  @media (orientation: portrait) and (max-width: 700px) {
+    #rotate { display: flex; }
+  }
+</style>
+</head>
+<body>
+<canvas id="g" width="1280" height="720"></canvas>
+<div id="rotate">スマホを横向きにしてね 📱↻</div>
+<script>
+"use strict";
+// ============================================================
+// ローソク足ランナー v3
+// 高度 = 株価。陽線は安全、陰線は崩れる。
+// ナイフを避け、優待を拾い、トレンドを乗りこなせ。
+// ============================================================
+const cvs = document.getElementById("g");
+const ctx = cvs.getContext("2d");
+let W = 1280;
+const H = 720;
+let CARD = null, OVER_SELECT_BTN = null, HELP_BTN = null;
+let helpOpen = false;
+
+function layoutUI() {
+  CARD = {
+    mometan:   { x: W / 2 - 250 - 175, y: 330, w: 350, h: 290 },
+    ishibashi: { x: W / 2 + 250 - 175, y: 330, w: 350, h: 290 }
+  };
+  OVER_SELECT_BTN = { x: W / 2 - 160, y: 610, w: 320, h: 46 };
+  HELP_BTN = { x: W - 226, y: 62, w: 196, h: 46 };
+}
+function fit() {
+  // 画面の縦横比に合わせて描画幅を可変に (横長スマホでも黒帯が出ない)
+  const aspect = innerWidth / Math.max(1, innerHeight);
+  W = Math.round(Math.max(1000, Math.min(1760, 720 * aspect)));
+  if (cvs.width !== W) cvs.width = W;
+  layoutUI();
+  const s = Math.min(innerWidth / W, innerHeight / H);
+  cvs.style.width = (W * s) + "px";
+  cvs.style.height = (H * s) + "px";
+}
+addEventListener("resize", fit);
+fit();
+
+// ---------- ユーティリティ ----------
+const rand = (a, b) => a + Math.random() * (b - a);
+const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+const lerp = (a, b, t) => a + (b - a) * t;
+const yen = n => "¥" + Math.round(n).toLocaleString("ja-JP");
+// 高度 + 生き残った距離で株価が決まる (長く生きるほど株価も伸びる)
+const priceAt = wy => Math.max(0, Math.round((900 - wy) * 3 + 800 + (typeof dist === "number" ? dist : 0) * 0.12));
+
+// ---------- キャラクター ----------
+const CHARS = {
+  mometan: {
+    name: "モメタン", company: "モメタン興産 (5150)",
+    type: "スピード型 (上級者向け)", desc: "速い・高く跳ぶ・一発勝負",
+    speedMul: 1.08, jumpMul: 1.06, airJumps: 0, emoji: "🐹", h: 86
+  },
+  ishibashi: {
+    name: "イシバシ", company: "イシバシ堂 (8888)",
+    type: "堅実型 (初心者おすすめ)", desc: "ゆっくり・2段ジャンプできる",
+    speedMul: 0.9, jumpMul: 1.0, airJumps: 1, emoji: "🐢", h: 104
+  }
+};
+let selChar = "mometan";
+
+// キャラ別ベスト記録
+let bests = {};
+try { bests = JSON.parse(localStorage.getItem("clrBests") || "{}"); } catch (e) {}
+const bestOf = k => bests[k] || 0;
+
+// スプライト読み込み (無ければ絵文字で代用)
+const imgs = {};
+for (const key of Object.keys(CHARS)) {
+  imgs[key] = {};
+  for (const f of ["run_1", "run_2", "jump", "fall"]) {
+    const im = new Image();
+    im.onload = () => { im.ok = true; };
+    im.src = "assets/characters/" + key + "/" + key + "_" + f + ".png";
+    imgs[key][f] = im;
+  }
+}
+
+// ---------- サウンド ----------
+let AC = null, audioUnlocked = false;
+function audio() {
+  if (!AC) { try { AC = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) {} }
+  if (AC && AC.state === "suspended") AC.resume();
+  if (AC && !audioUnlocked) {
+    // iOS/Android の音声ロック解除 (無音バッファを1回鳴らす)
+    try {
+      const b = AC.createBuffer(1, 1, 22050);
+      const s = AC.createBufferSource();
+      s.buffer = b; s.connect(AC.destination); s.start(0);
+      audioUnlocked = true;
+    } catch (e) {}
+  }
+  return AC;
+}
+function beep(f0, f1, dur, type, vol, delay) {
+  const a = audio(); if (!a) return;
+  try {
+    const t0 = a.currentTime + (delay || 0);
+    const o = a.createOscillator(), g = a.createGain();
+    o.type = type || "square";
+    o.frequency.setValueAtTime(f0, t0);
+    o.frequency.exponentialRampToValueAtTime(Math.max(f1, 1), t0 + dur);
+    g.gain.setValueAtTime(vol || 0.12, t0);
+    g.gain.exponentialRampToValueAtTime(0.001, t0 + dur);
+    o.connect(g); g.connect(a.destination);
+    o.start(t0); o.stop(t0 + dur);
+  } catch (e) {}
+}
+const sJump  = () => beep(300, 640, 0.13, "square", 0.10);
+const sDjump = () => beep(420, 820, 0.13, "square", 0.10);
+const sLand  = () => beep(160, 90, 0.06, "triangle", 0.09);
+const sCoin  = () => { beep(950, 1350, 0.08, "square", 0.10); beep(1300, 1900, 0.10, "square", 0.10, 0.055); };
+const sGift  = () => { beep(660, 660, 0.1, "square", 0.11); beep(830, 830, 0.1, "square", 0.11, 0.1); beep(990, 1320, 0.22, "square", 0.11, 0.2); };
+const sCrumb = () => beep(220, 70, 0.22, "sawtooth", 0.09);
+const sKnife = () => beep(1500, 1200, 0.08, "sine", 0.1);
+const sStick = () => beep(120, 60, 0.1, "sawtooth", 0.12);
+const sCB    = () => { beep(320, 240, 0.3, "sawtooth", 0.13); beep(320, 240, 0.3, "sawtooth", 0.13, 0.35); };
+const sDie   = () => beep(480, 55, 0.6, "sawtooth", 0.16);
+const sNews  = () => { beep(340, 300, 0.4, "sawtooth", 0.08); beep(300, 340, 0.4, "sawtooth", 0.08, 0.4); };
+const sCrossUp = () => { [523, 659, 784, 1047].forEach((f, i) => beep(f, f, 0.14, "square", 0.1, i * 0.11)); };
+const sCrossDn = () => { [520, 415, 330, 262].forEach((f, i) => beep(f, f, 0.16, "triangle", 0.11, i * 0.12)); };
+const sStopHigh = () => { [660, 880, 1100, 1320].forEach((f, i) => beep(f, f * 1.1, 0.12, "square", 0.1, i * 0.08)); };
+
+// ---------- ゲーム状態 ----------
+const G_GRAV = 2400, JUMP_V = -950, RUN_Y0 = 460;
+let state = "title";        // title | play | over
+let candles, coins, gifts, knives, parts, texts, banners;
+let player, camX, camY, dist, speed, day, divTotal, maxPrice, milestone;
+let genX, lastTop, crashLeft, shakeT, flashRed, overT, deathReason, tGlobal = 0;
+let knifeT, fnT, fakeT, cbT, trend, trendLeft;
+
+const GIFT_NAMES = ["お米券", "クオカード", "カタログギフト", "自社製品詰合せ", "お食事券", "図書カード"];
+
+function chr() { return CHARS[selChar]; }
+function baseSpeed() { return (248 + (dist / 1000) * 9) * chr().speedMul; }
+function banner(text, sub, color) { banners.push({ text, sub, color, t: 0 }); }
+
+function reset() {
+  candles = []; coins = []; gifts = []; knives = [];
+  parts = []; texts = []; banners = [];
+  dist = 0; day = 0; divTotal = 0; crashLeft = 0; cbT = 0; fakeT = 0;
+  shakeT = 0; flashRed = 0; overT = 0; deathReason = ""; milestone = 0;
+  knifeT = 5; fnT = rand(14, 22);
+  trend = "none"; trendLeft = 0;
+  speed = 248 * chr().speedMul;
+  candles.push({ x: -300, w: 850, top: RUN_Y0 + 60, bodyH: 200, bull: true,
+                 hiW: 0, loW: 0, vol: 0.5, armed: false, cr: 0, falling: false, dy: 0, fallV: 0, idx: 0 });
+  genX = 550; lastTop = RUN_Y0 + 60;
+  player = { x: 60, y: RUN_Y0 + 60, vy: 0, onGround: true, coyote: 0, jumpBuf: 0,
+             squash: 0, ground: candles[0], air: chr().airJumps };
+  camX = player.x - 250; camY = player.y - 430;
+  maxPrice = priceAt(player.y);
+  while (genX < camX + W * 2.5) genCandle();
+}
+
+// ---------- コース生成 (株価ランダムウォーク + トレンド相場) ----------
+function genCandle() {
+  const easing = clamp(dist / 1500, 0, 1);
+  let gap, dy;
+  if (crashLeft > 0) {                       // 急落中: 下りの陰線が続く
+    gap = rand(55, 100);
+    dy = rand(105, 175);
+    crashLeft--;
+  } else if (dist > 1600 && lastTop < 440 && trend === "none" && Math.random() < 0.04) {
+    crashLeft = 2;                           // 急落 → サーキットブレーカー発動
+    gap = rand(55, 100);
+    dy = rand(105, 175);
+    banner("⚠ 急落!", "", "#ff5a5a");
+    flashRed = 0.9; cbT = 1.9;
+    sCB();
+  } else {
+    if (trend === "golden")     dy = rand(-100, 12);   // 上昇トレンド
+    else if (trend === "dead")  dy = rand(-20, 95);    // 下降トレンド
+    else                        dy = rand(lerp(-78, -108, easing), 84);
+    const tightness = dy < -60 ? 0.28 : lerp(0.34, 0.44, easing);
+    gap = rand(48, clamp(speed * tightness, 85, 220));
+  }
+  const x = genX + gap;
+  const w = rand(85, 155);
+  const top = clamp(lastTop + dy, 150, 595);
+  const bull = top <= lastTop;
+  const c = {
+    x, w, top,
+    bodyH: rand(115, 255),
+    bull,
+    hiW: rand(18, 85), loW: rand(18, 85),
+    vol: rand(0.15, 1),
+    armed: false, cr: 0, falling: false, dy: 0, fallV: 0,
+    kessan: false,
+    idx: candles[candles.length - 1].idx + 1
+  };
+  candles.push(c);
+
+  // トレンド相場の開始と終了
+  if (trend !== "none") {
+    trendLeft -= gap + w;
+    if (trendLeft <= 0) trend = "none";
+  } else if (dist > 2200 && crashLeft === 0 && Math.random() < 0.05) {
+    if (Math.random() < 0.5) {
+      trend = "golden"; trendLeft = rand(1500, 2300);
+      banner("✨ ゴールデンクロス!", "上昇トレンド突入 — コインチャンス!", "#ffd964");
+      sCrossUp();
+    } else {
+      trend = "dead"; trendLeft = rand(1400, 2000);
+      banner("💀 デッドクロス…", "下降トレンド — 陰線だらけ、足元注意!", "#9db4ff");
+      sCrossDn();
+    }
+  }
+
+  // 📊 決算発表カード
+  if (trend === "none" && crashLeft === 0 && c.idx > 8 && Math.random() < 0.045) {
+    c.kessan = true;
+  }
+
+  // コイン & 優待 (ゴールデンクロス中は大盤振る舞い)
+  const cx = x + w / 2;
+  const giftP = trend === "golden" ? 0.12 : 0.07;
+  const coinP = trend === "golden" ? 0.62 : 0.33;
+  if (Math.random() < giftP) {
+    gifts.push({ x: cx, y: top - rand(105, 175), taken: false, bob: Math.random() * 6 });
+  } else if (Math.random() < coinP) {
+    coins.push({ x: cx, y: top - rand(100, 185), taken: false, spin: Math.random() * 6 });
+  }
+  genX = x + w;
+  lastTop = top;
+}
+
+// ---------- 入力 ----------
+function canvasPos(e) {
+  const r = cvs.getBoundingClientRect();
+  return { x: (e.clientX - r.left) * W / r.width, y: (e.clientY - r.top) * H / r.height };
+}
+function goFullscreen() {
+  // スマホ(タッチ端末)なら全画面表示を試みる
+  try {
+    if (document.fullscreenElement || !matchMedia("(pointer: coarse)").matches) return;
+    const el = document.documentElement;
+    const fn = el.requestFullscreen || el.webkitRequestFullscreen;
+    if (fn) { const r = fn.call(el, { navigationUI: "hide" }); if (r && r.catch) r.catch(() => {}); }
+  } catch (e) {}
+}
+
+function pressDown(p) {
+  audio();
+  if (state === "title") {
+    if (helpOpen) { helpOpen = false; return; }   // ガイドはどこをタップしても閉じる
+    if (p) {
+      if (p.x >= HELP_BTN.x && p.x <= HELP_BTN.x + HELP_BTN.w &&
+          p.y >= HELP_BTN.y && p.y <= HELP_BTN.y + HELP_BTN.h) {
+        helpOpen = true; return;
+      }
+      for (const key of Object.keys(CARD)) {
+        const c = CARD[key];
+        if (p.x >= c.x && p.x <= c.x + c.w && p.y >= c.y && p.y <= c.y + c.h) {
+          selChar = key; goFullscreen(); reset(); state = "play"; return;
+        }
+      }
+      return;
+    }
+    reset(); state = "play"; return;
+  }
+  if (state === "over") {
+    if (overT < 0.5) return;
+    if (p && p.x >= OVER_SELECT_BTN.x && p.x <= OVER_SELECT_BTN.x + OVER_SELECT_BTN.w &&
+        p.y >= OVER_SELECT_BTN.y && p.y <= OVER_SELECT_BTN.y + OVER_SELECT_BTN.h) {
+      state = "title"; return;
+    }
+    if (p) goFullscreen();
+    reset(); state = "play"; return;
+  }
+  player.jumpBuf = 0.13;
+}
+function pressUp() {
+  if (state === "play" && player.vy < 0) player.vy *= 0.45;
+}
+addEventListener("keydown", e => {
+  if ((e.code === "Space" || e.code === "ArrowUp") && !e.repeat) { e.preventDefault(); pressDown(null); }
+  if (state === "title" && (e.code === "ArrowLeft" || e.code === "ArrowRight")) {
+    selChar = selChar === "mometan" ? "ishibashi" : "mometan";
+  }
+  if (state === "over" && e.code === "KeyC") state = "title";
+});
+addEventListener("keyup", e => {
+  if (e.code === "Space" || e.code === "ArrowUp") pressUp();
+});
+cvs.addEventListener("pointerdown", e => { e.preventDefault(); pressDown(canvasPos(e)); });
+addEventListener("pointerup", () => pressUp());
+cvs.addEventListener("touchstart", e => e.preventDefault(), { passive: false });
+cvs.addEventListener("touchend", () => audio());
+
+// ---------- パーティクル ----------
+function puff(x, y, n, color, spread, up) {
+  for (let i = 0; i < n; i++) {
+    parts.push({ x: x + rand(-spread, spread), y: y + rand(-6, 6),
+      vx: rand(-90, 90), vy: up ? rand(-260, -60) : rand(-40, 10),
+      life: rand(0.3, 0.7), t: 0, size: rand(2.5, 6), color });
+  }
+}
+function floatText(x, y, str, color, big) {
+  texts.push({ x, y, str, color, t: 0, big: !!big });
+}
+
+// ---------- 更新 ----------
+function doJump(mul, isAir) {
+  player.vy = JUMP_V * chr().jumpMul * mul;
+  player.onGround = false; player.coyote = 0; player.jumpBuf = 0;
+  player.squash = -0.25;
+  if (isAir) { sDjump(); puff(player.x, player.y, 8, "#9adcff", 18, false); }
+  else { sJump(); puff(player.x, player.y, 5, "#8fa8c8", 14, false); }
+}
+
+function update(rawDt) {
+  tGlobal += rawDt;
+  let ts = 1;
+  if (cbT > 0) {
+    cbT -= rawDt;
+    ts = cbT > 0.4 ? 0.35 : lerp(1, 0.35, cbT / 0.4);
+  }
+  const dt = rawDt * ts;
+
+  if (state !== "play") { if (state === "over") overT += rawDt; updateFx(rawDt); return; }
+
+  dist += speed * dt;
+  speed = Math.min(baseSpeed(), 540 * chr().speedMul);
+  player.x += speed * dt;
+
+  player.coyote -= dt; player.jumpBuf -= dt;
+  if (player.jumpBuf > 0) {
+    if (player.onGround || player.coyote > 0) doJump(1, false);
+    else if (player.air > 0) { player.air--; doJump(0.92, true); }
+  }
+
+  const prevY = player.y;
+  player.vy = Math.min(player.vy + G_GRAV * dt, 1600);
+  player.y += player.vy * dt;
+
+  // 壁(ローソク側面): 上端付近なら自動よじ登り、それ以外は進行ブロック
+  let landed = null;
+  for (const c of candles) {
+    if (c.falling) continue;
+    const top = c.top + c.dy;
+    const bottom = top + c.bodyH;
+    if (player.x + 16 > c.x && player.x - 16 < c.x + 20 &&
+        player.y > top + 4 && player.y - 44 < bottom) {
+      if (player.y <= top + 52) {
+        player.y = top; player.vy = 0; landed = c;
+        puff(player.x, player.y, 4, "#8fa8c8", 8, false);
+      } else {
+        player.x = c.x - 16;
+      }
+      break;
+    }
+  }
+  if (!landed && player.vy >= 0) {
+    for (const c of candles) {
+      if (c.falling) continue;
+      const top = c.top + c.dy;
+      if (player.x + 16 > c.x && player.x - 16 < c.x + c.w &&
+          prevY <= top + 2 && player.y >= top) {
+        player.y = top; player.vy = 0; landed = c;
+        break;
+      }
+    }
+  }
+  if (landed) {
+    if (!player.onGround) { sLand(); player.squash = 0.3; puff(player.x, player.y, 6, "#7d92ad", 16, false); }
+    player.onGround = true; player.ground = landed; player.air = chr().airJumps;
+    if (landed.idx > day) day = landed.idx;
+    if (!landed.bull && !landed.armed && landed.idx > 5) landed.armed = true;
+    // 📊 決算発表!
+    if (landed.kessan) {
+      landed.kessan = false;
+      if (Math.random() < 0.5) {
+        player.vy = -1250; player.onGround = false;
+        floatText(player.x, player.y - 150, "🎉 好決算! ストップ高!", "#ffd964", true);
+        sStopHigh();
+        puff(player.x, player.y, 18, "#ffd964", 20, true);
+        for (let i = 1; i <= 4; i++) {
+          coins.push({ x: player.x + i * 95, y: player.y - 200 - i * 35, taken: false, spin: i });
+        }
+      } else {
+        crashLeft = 2; cbT = 1.4; flashRed = 0.7;
+        banner("📉 決算ミス…", "売りが売りを呼ぶ! 急落に備えろ!", "#ff8888");
+        sCB();
+      }
+    }
+  } else if (player.onGround) {
+    const c = player.ground;
+    const off = !c || c.falling || player.x - 16 > c.x + c.w || player.x + 16 < c.x;
+    if (off || player.vy > 0) { player.onGround = false; player.coyote = 0.1; }
+  }
+
+  // 陰線の崩壊
+  for (const c of candles) {
+    if (c.armed && !c.falling) {
+      c.cr += dt;
+      if (c.cr > 0.28 && c.cr < 0.3) sCrumb();
+      if (c.cr > 0.62) {
+        c.falling = true; c.fallV = 0;
+        puff(c.x + c.w / 2, c.top, 14, "#1ec8d8", c.w / 2, true);
+        if (player.onGround && player.ground === c) { player.onGround = false; player.coyote = 0.09; }
+      }
+    }
+    if (c.falling) { c.fallV += 2200 * dt; c.dy += c.fallV * dt; }
+  }
+
+  // 🔪 落ちてくるナイフ
+  if (dist > 900) {
+    knifeT -= dt;
+    if (knifeT <= 0) {
+      knifeT = rand(3.4, 6.4) - Math.min(1.9, dist / 9000);
+      knives.push({ x: player.x + speed * rand(0.95, 1.5), y: 0, vy: 0,
+                    warn: 0.9, stuck: false, stuckT: 0 });
+      sKnife();
+    }
+  }
+  for (const k of knives) {
+    if (k.warn > 0) {
+      k.warn -= dt;
+      if (k.warn <= 0) { k.y = camY - 60; k.vy = 620 + speed * 0.45; }
+      continue;
+    }
+    if (k.stuck) { k.stuckT += dt; continue; }
+    k.y += k.vy * dt;
+    for (const c of candles) {
+      if (c.falling) continue;
+      const top = c.top + c.dy;
+      if (k.x > c.x && k.x < c.x + c.w && k.y >= top && k.y <= top + 30) {
+        k.stuck = true; k.y = top + 6; sStick();
+        puff(k.x, top, 5, "#aab7c4", 6, true);
+        break;
+      }
+    }
+    if (k.y > camY + H + 100) k.stuck = true;
+    if (!k.stuck && Math.abs(k.x - player.x) < 24 && Math.abs(k.y - (player.y - 26)) < 38) {
+      die("🔪 落ちてくるナイフを掴んでしまった…");
+      return;
+    }
+  }
+  knives = knives.filter(k => !(k.stuck && k.stuckT > 1.4) && k.x > camX - 100);
+
+  // 📰 フェイクニュース (視界不良)
+  if (dist > 2600 && fakeT <= 0 && cbT <= 0) {
+    fnT -= dt;
+    if (fnT <= 0) {
+      fnT = rand(14, 22);
+      fakeT = 4.6;
+      banner("📰 フェイクニュース拡散!", "視界不良 — 足元に集中しろ!", "#c9a7ff");
+      sNews();
+    }
+  }
+
+  // 💰 配当コイン
+  for (const co of coins) {
+    if (co.taken) continue;
+    co.spin += dt * 6;
+    if (Math.abs(co.x - player.x) < 32 && Math.abs(co.y - (player.y - 24)) < 42) {
+      co.taken = true; divTotal += 100;
+      sCoin();
+      floatText(co.x, co.y - 10, "+¥100 配当", "#ffd964");
+      puff(co.x, co.y, 8, "#ffd964", 8, true);
+    }
+  }
+  // 🎁 株主優待
+  for (const gf of gifts) {
+    if (gf.taken) continue;
+    gf.bob += dt * 3;
+    if (Math.abs(gf.x - player.x) < 36 && Math.abs(gf.y - (player.y - 24)) < 46) {
+      gf.taken = true; divTotal += 500;
+      sGift();
+      const name = GIFT_NAMES[Math.floor(Math.random() * GIFT_NAMES.length)];
+      floatText(gf.x, gf.y - 14, "🎁 優待: " + name + " +¥500", "#ff9ee0", true);
+      puff(gf.x, gf.y, 16, "#ff9ee0", 12, true);
+    }
+  }
+
+  // 株価更新 & 上場来高値
+  const p = priceAt(player.y);
+  if (p > maxPrice) {
+    maxPrice = p;
+    const m = Math.floor(maxPrice / 3000);
+    if (m > milestone && maxPrice > 3500) {
+      milestone = m;
+      floatText(player.x, player.y - 130, "🎉 上場来高値 " + yen(maxPrice) + "!", "#42e8d1", true);
+      beep(880, 1320, 0.18, "square", 0.1);
+    }
+  }
+
+  // カメラ
+  camX = player.x - 250;
+  camY = lerp(camY, player.y - 430, Math.min(1, dt * 2.4));
+
+  // 生成 & 掃除
+  while (genX < camX + W * 2) genCandle();
+  while (candles.length && candles[0].x + candles[0].w < camX - 400) candles.shift();
+  while (coins.length && coins[0].x < camX - 200) coins.shift();
+  while (gifts.length && gifts[0].x < camX - 200) gifts.shift();
+
+  // 落下 = ロスカット
+  if (player.y > camY + H + 90) {
+    die("📉 相場から転落してしまった…");
+    return;
+  }
+
+  updateFx(rawDt);
+}
+
+function die(reason) {
+  state = "over"; overT = 0; deathReason = reason;
+  sDie(); shakeT = 0.5;
+  const score = maxPrice + divTotal;
+  if (score > bestOf(selChar)) {
+    bests[selChar] = score;
+    try { localStorage.setItem("clrBests", JSON.stringify(bests)); } catch (e) {}
+  }
+}
+
+function updateFx(dt) {
+  if (player) player.squash = lerp(player.squash, 0, Math.min(1, dt * 10));
+  shakeT = Math.max(0, shakeT - dt);
+  flashRed = Math.max(0, flashRed - dt);
+  fakeT = Math.max(0, fakeT - dt);
+  for (const p of parts) { p.t += dt; p.x += p.vx * dt; p.y += p.vy * dt; p.vy += 900 * dt; }
+  parts = parts.filter(p => p.t < p.life);
+  for (const t of texts) t.t += dt;
+  texts = texts.filter(t => t.t < (t.big ? 1.6 : 1.1));
+  for (const b of banners) b.t += dt;
+  banners = banners.filter(b => b.t < 2.4);
+}
+
+// ---------- 描画 ----------
+const COL = {
+  bg1: "#0a0f1c", bg2: "#0d1526",
+  grid: "rgba(78,110,150,0.13)",
+  bull: "#ef3d5d", bullLight: "#ff7189",
+  bear: "#1ec8d8", bearLight: "#6ee4f0",
+  ma1: "#f5a742", ma2: "#4caf50", ma3: "#ef5350",
+  axis: "rgba(13,21,38,0.85)",
+  text: "#dce8f5", dim: "#8ba3bd", gold: "#ffd964"
+};
+
+function drawMA(win, offset, color) {
+  ctx.strokeStyle = color; ctx.lineWidth = 2; ctx.globalAlpha = 0.55;
+  ctx.beginPath();
+  let started = false;
+  for (let i = 0; i < candles.length; i++) {
+    let sum = 0, n = 0;
+    for (let j = Math.max(0, i - win + 1); j <= i; j++) { sum += candles[j].top; n++; }
+    const mx = candles[i].x + candles[i].w / 2, my = sum / n + offset;
+    if (!started) { ctx.moveTo(mx, my); started = true; } else ctx.lineTo(mx, my);
+  }
+  ctx.stroke();
+  ctx.globalAlpha = 1;
+}
+
+function drawChar(key, x, y, h, frame) {
+  const set = imgs[key];
+  const im = set && set[frame] && set[frame].ok ? set[frame] : null;
+  if (im) {
+    const w = h * im.width / im.height;
+    ctx.drawImage(im, x - w / 2, y - h, w, h);
+  } else {
+    ctx.font = Math.round(h * 0.62) + "px serif";
+    ctx.textAlign = "center"; ctx.textBaseline = "bottom";
+    ctx.fillText(CHARS[key].emoji, x, y + 2);
+  }
+}
+
+function draw() {
+  const bg = ctx.createLinearGradient(0, 0, 0, H);
+  bg.addColorStop(0, COL.bg2); bg.addColorStop(1, COL.bg1);
+  ctx.fillStyle = bg; ctx.fillRect(0, 0, W, H);
+
+  const shX = shakeT > 0 ? rand(-6, 6) * shakeT : 0;
+  const shY = shakeT > 0 ? rand(-6, 6) * shakeT : 0;
+
+  ctx.save();
+  ctx.translate(-camX + shX, -camY + shY);
+
+  // グリッド
+  ctx.strokeStyle = COL.grid; ctx.lineWidth = 1;
+  const gx0 = Math.floor(camX / 160) * 160;
+  for (let gx = gx0; gx < camX + W + 160; gx += 160) {
+    ctx.beginPath(); ctx.moveTo(gx, camY - 40); ctx.lineTo(gx, camY + H + 40); ctx.stroke();
+  }
+  const gy0 = Math.floor(camY / 90) * 90;
+  for (let gy = gy0; gy < camY + H + 90; gy += 90) {
+    ctx.beginPath(); ctx.moveTo(camX - 40, gy); ctx.lineTo(camX + W + 40, gy); ctx.stroke();
+  }
+
+  // 移動平均線 3本
+  drawMA(5, -30, COL.ma1);
+  drawMA(10, -10, COL.ma2);
+  drawMA(14, 170, COL.ma3);
+
+  // ローソク足
+  for (const c of candles) {
+    const top = c.top + c.dy;
+    const shake = (c.armed && !c.falling && c.cr > 0.25) ? Math.sin(tGlobal * 55) * 2.5 : 0;
+    const cx = c.x + c.w / 2 + shake;
+    const col = c.bull ? COL.bull : COL.bear;
+    const lightCol = c.bull ? COL.bullLight : COL.bearLight;
+    ctx.globalAlpha = c.falling ? clamp(1 - c.dy / 500, 0, 1) : 1;
+    ctx.strokeStyle = col; ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.moveTo(cx, top - c.hiW); ctx.lineTo(cx, top + c.bodyH + c.loW);
+    ctx.stroke();
+    ctx.fillStyle = col;
+    ctx.fillRect(c.x + shake, top, c.w, c.bodyH);
+    ctx.fillStyle = lightCol;
+    ctx.fillRect(c.x + shake, top, c.w, 4);
+    ctx.strokeStyle = "rgba(255,255,255,0.14)"; ctx.lineWidth = 1.5;
+    ctx.strokeRect(c.x + shake, top, c.w, c.bodyH);
+    // 📊 決算予告
+    if (c.kessan) {
+      ctx.fillStyle = "rgba(255,220,118," + (0.75 + Math.sin(tGlobal * 6) * 0.25) + ")";
+      ctx.font = "bold 20px sans-serif"; ctx.textAlign = "center"; ctx.textBaseline = "bottom";
+      ctx.fillText("📊 決算", cx, top - c.hiW - 10);
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  // 💰 コイン
+  for (const co of coins) {
+    if (co.taken) continue;
+    const sc = Math.abs(Math.cos(co.spin));
+    ctx.save();
+    ctx.translate(co.x, co.y + Math.sin(co.spin * 0.7) * 4);
+    ctx.scale(Math.max(sc, 0.15), 1);
+    ctx.fillStyle = COL.gold;
+    ctx.beginPath(); ctx.arc(0, 0, 15, 0, 7); ctx.fill();
+    ctx.strokeStyle = "#b8912a"; ctx.lineWidth = 2.5;
+    ctx.beginPath(); ctx.arc(0, 0, 15, 0, 7); ctx.stroke();
+    ctx.fillStyle = "#7a5c12";
+    ctx.font = "bold 17px sans-serif"; ctx.textAlign = "center"; ctx.textBaseline = "middle";
+    ctx.fillText("¥", 0, 1);
+    ctx.restore();
+  }
+
+  // 🎁 優待ギフト
+  for (const gf of gifts) {
+    if (gf.taken) continue;
+    ctx.save();
+    ctx.translate(gf.x, gf.y + Math.sin(gf.bob) * 6);
+    ctx.font = "38px serif"; ctx.textAlign = "center"; ctx.textBaseline = "middle";
+    ctx.fillText("🎁", 0, 0);
+    ctx.restore();
+  }
+
+  // 🔪 ナイフ
+  for (const k of knives) {
+    if (k.warn > 0) continue;
+    ctx.save();
+    ctx.translate(k.x, k.y);
+    ctx.globalAlpha = k.stuck ? clamp(1 - k.stuckT / 1.2, 0, 1) * 0.7 : 1;
+    ctx.rotate(k.stuck ? 2.6 : 2.35);
+    ctx.font = "40px serif"; ctx.textAlign = "center"; ctx.textBaseline = "middle";
+    ctx.fillText("🔪", 0, 0);
+    ctx.restore();
+    if (!k.stuck) {
+      ctx.strokeStyle = "rgba(255,120,120,0.35)"; ctx.lineWidth = 3;
+      ctx.beginPath(); ctx.moveTo(k.x, k.y - 60); ctx.lineTo(k.x, k.y - 18); ctx.stroke();
+    }
+  }
+
+  // パーティクル
+  for (const p of parts) {
+    ctx.globalAlpha = 1 - p.t / p.life;
+    ctx.fillStyle = p.color;
+    ctx.fillRect(p.x - p.size / 2, p.y - p.size / 2, p.size, p.size);
+  }
+  ctx.globalAlpha = 1;
+
+  // フロートテキスト
+  for (const t of texts) {
+    const dur = t.big ? 1.6 : 1.1;
+    ctx.globalAlpha = 1 - t.t / dur;
+    ctx.fillStyle = t.color;
+    ctx.font = "bold " + (t.big ? 24 : 20) + "px sans-serif"; ctx.textAlign = "center";
+    ctx.fillText(t.str, t.x, t.y - t.t * 45);
+  }
+  ctx.globalAlpha = 1;
+
+  // プレイヤー
+  if (state !== "over" && player) {
+    ctx.save();
+    ctx.translate(player.x, player.y);
+    const sq = player.squash;
+    ctx.scale(1 + sq, 1 - sq);
+    ctx.rotate(clamp(player.vy * 0.0003, -0.25, 0.3));
+    const frame = state !== "play" ? "run_1" :
+      (!player.onGround ? (player.vy < 0 ? "jump" : "fall")
+                        : (Math.floor(tGlobal * 9) % 2 ? "run_1" : "run_2"));
+    drawChar(selChar, 0, 0, chr().h, frame);
+    ctx.restore();
+  }
+
+  ctx.restore();
+
+  // 📰 フェイクニュース: プレイヤーの周りだけ見える暗闇
+  if (fakeT > 0 && state === "play") {
+    const a = fakeT > 4.0 ? (4.6 - fakeT) / 0.6 * 0.74 :
+              fakeT < 0.7 ? fakeT / 0.7 * 0.74 : 0.74;
+    const px = player.x - camX, py = player.y - camY - 34;
+    const grd = ctx.createRadialGradient(px, py, 95, px, py, 360);
+    grd.addColorStop(0, "rgba(4,6,12,0)");
+    grd.addColorStop(1, "rgba(4,6,12," + a + ")");
+    ctx.fillStyle = grd;
+    ctx.fillRect(0, 0, W, H);
+  }
+
+  // トレンド相場の色味
+  if (state === "play" && trend === "golden") {
+    ctx.fillStyle = "rgba(255,200,80,0.05)";
+    ctx.fillRect(0, 0, W, H);
+  } else if (state === "play" && trend === "dead") {
+    ctx.fillStyle = "rgba(90,30,70,0.09)";
+    ctx.fillRect(0, 0, W, H);
+  }
+
+  // 急落の赤フラッシュ
+  if (flashRed > 0) {
+    ctx.fillStyle = "rgba(200,30,45," + (flashRed * 0.2) + ")";
+    ctx.fillRect(0, 0, W, H);
+  }
+
+  // ナイフの落下予告
+  for (const k of knives) {
+    if (k.warn <= 0) continue;
+    const sx = k.x - camX;
+    if (sx < 0 || sx > W) continue;
+    if (Math.sin(tGlobal * 18) > -0.4) {
+      ctx.fillStyle = "#ff5a5a";
+      ctx.font = "bold 34px sans-serif"; ctx.textAlign = "center"; ctx.textBaseline = "top";
+      ctx.fillText("⚠", sx, 52);
+    }
+  }
+
+  // 出来高バー
+  for (const c of candles) {
+    const vx = c.x - camX;
+    if (vx + c.w < 0 || vx > W) continue;
+    const vh = 18 + c.vol * 52;
+    ctx.fillStyle = c.bull ? "rgba(239,61,93,0.26)" : "rgba(30,200,216,0.26)";
+    ctx.fillRect(vx, H - vh, c.w, vh);
+  }
+
+  // 右側の価格軸
+  ctx.fillStyle = COL.axis;
+  ctx.fillRect(W - 78, 46, 78, H - 46);
+  ctx.strokeStyle = "rgba(120,150,190,0.25)";
+  ctx.beginPath(); ctx.moveTo(W - 78, 46); ctx.lineTo(W - 78, H); ctx.stroke();
+  ctx.font = "13px sans-serif"; ctx.textAlign = "left"; ctx.textBaseline = "middle";
+  ctx.fillStyle = COL.dim;
+  const gy0b = Math.floor(camY / 90) * 90;
+  for (let gy = gy0b; gy < camY + H + 90; gy += 90) {
+    const sy = gy - camY;
+    if (sy < 60 || sy > H - 14) continue;
+    ctx.fillText(priceAt(gy).toLocaleString(), W - 68, sy);
+  }
+  if (state === "play") {
+    const py = clamp(player.y - camY, 60, H - 16);
+    ctx.fillStyle = player.vy <= 0 ? COL.bull : COL.bear;
+    ctx.fillRect(W - 78, py - 12, 78, 24);
+    ctx.fillStyle = "#fff";
+    ctx.font = "bold 13px sans-serif";
+    ctx.fillText(priceAt(player.y).toLocaleString(), W - 70, py + 1);
+  }
+
+  // ヘッダーHUD
+  ctx.fillStyle = "rgba(7,12,24,0.92)";
+  ctx.fillRect(0, 0, W, 46);
+  ctx.strokeStyle = "rgba(120,150,190,0.2)";
+  ctx.beginPath(); ctx.moveTo(0, 46); ctx.lineTo(W, 46); ctx.stroke();
+  ctx.textBaseline = "middle"; ctx.textAlign = "left";
+  ctx.font = "bold 19px sans-serif"; ctx.fillStyle = COL.text;
+  ctx.fillText("📈 " + chr().company, 16, 24);
+  if (state !== "title" && player) {
+    ctx.fillStyle = COL.bullLight;
+    ctx.font = "bold 20px sans-serif";
+    ctx.fillText(yen(priceAt(player.y)), 340, 24);
+    ctx.fillStyle = COL.dim; ctx.font = "15px sans-serif";
+    ctx.fillText("高値 " + yen(maxPrice), 480, 24);
+    ctx.fillStyle = COL.gold;
+    ctx.fillText("配当 " + yen(divTotal), 640, 24);
+    ctx.fillStyle = COL.dim;
+    ctx.fillText(day + " 営業日目", 790, 24);
+    // トレンド表示 (幅が狭い画面ではベスト表示と重なるので省略)
+    if (W >= 1180) {
+      if (trend === "golden") { ctx.fillStyle = COL.gold; ctx.fillText("✨ 上昇トレンド", 910, 24); }
+      else if (trend === "dead") { ctx.fillStyle = "#9db4ff"; ctx.fillText("💀 下降トレンド", 910, 24); }
+    }
+  }
+  ctx.textAlign = "right";
+  ctx.fillStyle = COL.dim; ctx.font = "14px sans-serif";
+  ctx.fillText("ベスト " + yen(bestOf(selChar)), W - 90, 24);
+
+  // バナー (イベント告知)
+  for (const b of banners) {
+    const a = b.t < 0.25 ? b.t / 0.25 : (2.4 - b.t) / 0.9;
+    ctx.globalAlpha = clamp(a, 0, 1);
+    ctx.fillStyle = "rgba(7,12,24,0.75)";
+    ctx.fillRect(W / 2 - 340, 130, 680, b.sub ? 96 : 66);
+    ctx.strokeStyle = b.color; ctx.lineWidth = 2;
+    ctx.strokeRect(W / 2 - 340, 130, 680, b.sub ? 96 : 66);
+    ctx.fillStyle = b.color;
+    ctx.font = "bold 38px sans-serif"; ctx.textAlign = "center"; ctx.textBaseline = "middle";
+    ctx.fillText(b.text, W / 2, 165);
+    if (b.sub) {
+      ctx.fillStyle = COL.text; ctx.font = "18px sans-serif";
+      ctx.fillText(b.sub, W / 2, 203);
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  // サーキットブレーカー表示
+  if (cbT > 0 && state === "play") {
+    ctx.fillStyle = "rgba(20,40,80,0.25)";
+    ctx.fillRect(0, 0, W, H);
+    ctx.textAlign = "center";
+    ctx.fillStyle = "#7ecbff";
+    ctx.font = "bold 40px sans-serif";
+    ctx.fillText("🛑 サーキットブレーカー発動", W / 2, 280);
+    ctx.font = "20px sans-serif";
+    ctx.fillText("取引一時停止中 — 落ち着いて足場を見よう", W / 2, 322);
+  }
+
+  if (state === "title") drawTitle();
+  if (state === "over") drawOver();
+}
+
+function drawTitle() {
+  ctx.fillStyle = "rgba(5,8,15,0.78)"; ctx.fillRect(0, 0, W, H);
+  ctx.textAlign = "center"; ctx.textBaseline = "alphabetic";
+  ctx.fillStyle = COL.text;
+  ctx.font = "bold 58px sans-serif";
+  ctx.fillText("ローソク足ランナー 📈", W / 2, 120);
+  ctx.fillStyle = "#42e8d1"; ctx.font = "22px sans-serif";
+  ctx.fillText("株価の波を乗りこなして、高値を更新しろ!", W / 2, 168);
+
+  ctx.font = "16px sans-serif";
+  ctx.fillStyle = COL.bullLight;
+  ctx.fillText("🟥 陽線=安全 / 🟦 陰線=崩れる", W / 2 - 380, 225);
+  ctx.fillStyle = "#ff8888";
+  ctx.fillText("🔪 落ちてくるナイフは掴むな", W / 2, 225);
+  ctx.fillStyle = "#ff9ee0";
+  ctx.fillText("🎁 優待 / 📊 決算 / ✨ トレンド相場", W / 2 + 380, 225);
+  ctx.fillStyle = COL.dim;
+  ctx.fillText("タップ/スペース = ジャンプ (長押しで大ジャンプ)", W / 2, 262);
+
+  ctx.font = "bold 22px sans-serif"; ctx.fillStyle = COL.text;
+  ctx.fillText("キャラクターを選んでスタート", W / 2, 315);
+  for (const key of Object.keys(CARD)) {
+    const c = CARD[key], ch = CHARS[key];
+    const sel = key === selChar;
+    ctx.fillStyle = sel ? "rgba(30,50,90,0.95)" : "rgba(16,26,46,0.95)";
+    ctx.fillRect(c.x, c.y, c.w, c.h);
+    ctx.strokeStyle = sel ? "#42e8d1" : "rgba(120,150,190,0.4)";
+    ctx.lineWidth = sel ? 3 : 1.5;
+    ctx.strokeRect(c.x, c.y, c.w, c.h);
+    drawChar(key, c.x + c.w / 2, c.y + 140, 112, Math.floor(tGlobal * 5) % 2 ? "run_1" : "run_2");
+    ctx.fillStyle = "#fff"; ctx.font = "bold 24px sans-serif"; ctx.textAlign = "center";
+    ctx.fillText(ch.name, c.x + c.w / 2, c.y + 178);
+    ctx.fillStyle = "#ffdc76"; ctx.font = "bold 16px sans-serif";
+    ctx.fillText(ch.type, c.x + c.w / 2, c.y + 206);
+    ctx.fillStyle = COL.dim; ctx.font = "15px sans-serif";
+    ctx.fillText(ch.desc, c.x + c.w / 2, c.y + 232);
+    ctx.fillStyle = COL.gold; ctx.font = "bold 16px sans-serif";
+    ctx.fillText("🏆 ベスト " + yen(bestOf(key)), c.x + c.w / 2, c.y + 262);
+  }
+  if (Math.sin(tGlobal * 4) > -0.3) {
+    ctx.fillStyle = COL.text; ctx.font = "bold 22px sans-serif";
+    ctx.fillText("― カードをタップでスタート (←→で選択 / スペースで開始) ―", W / 2, 672);
+  }
+
+  // ❓ あそびかたボタン
+  ctx.fillStyle = "rgba(16,26,46,0.95)";
+  ctx.fillRect(HELP_BTN.x, HELP_BTN.y, HELP_BTN.w, HELP_BTN.h);
+  ctx.strokeStyle = "#42e8d1"; ctx.lineWidth = 2;
+  ctx.strokeRect(HELP_BTN.x, HELP_BTN.y, HELP_BTN.w, HELP_BTN.h);
+  ctx.fillStyle = COL.text; ctx.font = "bold 20px sans-serif"; ctx.textAlign = "center";
+  ctx.fillText("❓ あそびかた", HELP_BTN.x + HELP_BTN.w / 2, HELP_BTN.y + 31);
+
+  if (helpOpen) drawHelp();
+}
+
+function drawHelp() {
+  ctx.fillStyle = "rgba(3,5,10,0.88)"; ctx.fillRect(0, 0, W, H);
+  const pw = Math.min(920, W - 60);
+  const px = W / 2 - pw / 2;
+  ctx.fillStyle = "rgba(13,21,38,0.97)";
+  ctx.fillRect(px, 52, pw, 616);
+  ctx.strokeStyle = "#42e8d1"; ctx.lineWidth = 2;
+  ctx.strokeRect(px, 52, pw, 616);
+
+  ctx.textAlign = "center";
+  ctx.fillStyle = COL.text; ctx.font = "bold 32px sans-serif";
+  ctx.fillText("📖 あそびかた", W / 2, 102);
+
+  const lines = [
+    ["🕹️", "タップ / スペースでジャンプ。長押しで大ジャンプ", COL.text],
+    ["🐢", "イシバシは空中でもう1回ジャンプできる (2段ジャンプ)", COL.text],
+    ["🟥", "陽線(ピンク)は安全な足場。🟦 陰線(水色)は乗ると崩れる!", COL.bullLight],
+    ["🔪", "落ちてくるナイフに触れたらアウト。床に刺されば無害", "#ff8888"],
+    ["💰", "配当コイン +¥100、🎁 株主優待 +¥500 でスコアUP", COL.gold],
+    ["📊", "「決算」の足に乗ると50/50 — ストップ高 or 急落!", "#ffdc76"],
+    ["✨", "ゴールデンクロス=ボーナス相場、💀 デッドクロス=下落相場", COL.text],
+    ["📰", "フェイクニュース=視界不良。🛑 サーキットブレーカー=スローで救済", "#c9a7ff"],
+    ["📉", "落ちたらロスカット。スコア = 高値 + 配当", COL.dim]
+  ];
+  ctx.textAlign = "left";
+  let y = 158;
+  for (const [icon, text, color] of lines) {
+    ctx.font = "24px serif";
+    ctx.fillStyle = COL.text;
+    ctx.fillText(icon, px + 34, y);
+    ctx.font = "19px sans-serif";
+    ctx.fillStyle = color;
+    ctx.fillText(text, px + 78, y);
+    y += 50;
+  }
+  ctx.textAlign = "center";
+  if (Math.sin(tGlobal * 4) > -0.3) {
+    ctx.fillStyle = COL.text; ctx.font = "bold 20px sans-serif";
+    ctx.fillText("― タップで閉じる ―", W / 2, 640);
+  }
+}
+
+function drawOver() {
+  ctx.fillStyle = "rgba(5,8,15,0.72)"; ctx.fillRect(0, 0, W, H);
+  ctx.textAlign = "center"; ctx.textBaseline = "alphabetic";
+  ctx.fillStyle = "#ff6a6a"; ctx.font = "bold 54px sans-serif";
+  ctx.fillText("📉 ロスカット!", W / 2, 170);
+  ctx.fillStyle = COL.text; ctx.font = "22px sans-serif";
+  ctx.fillText(deathReason, W / 2, 228);
+  const score = maxPrice + divTotal;
+  ctx.font = "22px sans-serif";
+  ctx.fillText("高値 " + yen(maxPrice) + "　＋　配当 " + yen(divTotal), W / 2, 305);
+  ctx.font = "bold 42px sans-serif"; ctx.fillStyle = COL.gold;
+  ctx.fillText("スコア " + yen(score), W / 2, 368);
+  ctx.font = "20px sans-serif";
+  ctx.fillStyle = score >= bestOf(selChar) ? "#42e8d1" : COL.dim;
+  ctx.fillText(score >= bestOf(selChar) ? "🎉 " + CHARS[selChar].name + "の自己ベスト更新!" : "", W / 2, 415);
+  ctx.fillStyle = COL.dim;
+  ctx.fillText(CHARS[selChar].name + " は " + day + " 営業日 生き残った", W / 2, 450);
+  // 🏆 キャラ別ランキング
+  ctx.font = "17px sans-serif"; ctx.fillStyle = COL.dim;
+  ctx.fillText("🏆 ベスト記録　モメタン " + yen(bestOf("mometan")) + " ／ イシバシ " + yen(bestOf("ishibashi")), W / 2, 495);
+  if (overT > 0.5) {
+    if (Math.sin(tGlobal * 4) > -0.3) {
+      ctx.fillStyle = COL.text; ctx.font = "bold 26px sans-serif";
+      ctx.fillText("― タップでリトライ ―", W / 2, 575);
+    }
+    const b = OVER_SELECT_BTN;
+    ctx.fillStyle = "rgba(16,26,46,0.95)";
+    ctx.fillRect(b.x, b.y, b.w, b.h);
+    ctx.strokeStyle = "rgba(120,150,190,0.5)"; ctx.lineWidth = 1.5;
+    ctx.strokeRect(b.x, b.y, b.w, b.h);
+    ctx.fillStyle = COL.dim; ctx.font = "17px sans-serif";
+    ctx.fillText("キャラ選択に戻る (Cキー)", W / 2, b.y + 28);
+  }
+}
+
+// ---------- メインループ ----------
+let lastT = performance.now();
+function loop(now) {
+  const dt = Math.min((now - lastT) / 1000, 0.033);
+  lastT = now;
+  update(dt);
+  draw();
+  requestAnimationFrame(loop);
+}
+reset();
+requestAnimationFrame(loop);
+
+// デバッグ用フック
+window.__game = { get state() { return state; }, get player() { return player; },
+                  get dist() { return dist; }, get candles() { return candles; },
+                  get knives() { return knives; },
+                  get cbT() { return cbT; }, get trend() { return trend; },
+                  get fakeT() { return fakeT; },
+                  get selChar() { return selChar; }, set selChar(v) { selChar = v; } };
+</script>
+</body>
+</html>
