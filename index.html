@@ -97,6 +97,14 @@ for (const key of Object.keys(CHARS)) {
     imgs[key][f] = im;
   }
 }
+// 🧛 ヘッジ伯爵のスプライト
+const bossImgs = {};
+for (const f of ["idle", "walk_1", "walk_2", "attack", "damage", "defeat"]) {
+  const im = new Image();
+  im.onload = () => { im.ok = true; };
+  im.src = "assets/characters/hedge/hedge_count_" + f + ".png";
+  bossImgs[f] = im;
+}
 
 // ---------- サウンド ----------
 let AC = null, audioUnlocked = false;
@@ -142,6 +150,8 @@ const sNews  = () => { beep(340, 300, 0.4, "sawtooth", 0.08); beep(300, 340, 0.4
 const sCrossUp = () => { [523, 659, 784, 1047].forEach((f, i) => beep(f, f, 0.14, "square", 0.1, i * 0.11)); };
 const sCrossDn = () => { [520, 415, 330, 262].forEach((f, i) => beep(f, f, 0.16, "triangle", 0.11, i * 0.12)); };
 const sStopHigh = () => { [660, 880, 1100, 1320].forEach((f, i) => beep(f, f * 1.1, 0.12, "square", 0.1, i * 0.08)); };
+const sBossIn = () => { [220, 196, 165, 131].forEach((f, i) => beep(f, f * 0.97, 0.22, "sawtooth", 0.13, i * 0.16)); };
+const sCurse  = () => beep(900, 240, 0.25, "sawtooth", 0.1);
 
 // ---------- ゲーム状態 ----------
 const G_GRAV = 2400, JUMP_V = -950, RUN_Y0 = 460;
@@ -150,6 +160,9 @@ let candles, coins, gifts, knives, parts, texts, banners;
 let player, camX, camY, dist, speed, day, divTotal, maxPrice, milestone;
 let genX, lastTop, crashLeft, shakeT, flashRed, overT, deathReason, tGlobal = 0;
 let knifeT, fnT, fakeT, cbT, trend, trendLeft;
+let bossActive, bossAppeared, bossBeaten, bossT, bossAtkT, bossAtkFlash, bossDefeatT;
+// 撮影・テスト用: URLに ?boss=1 を付けると序盤で必ずヘッジ伯爵が出る
+const FORCE_BOSS = new URLSearchParams(location.search).has("boss");
 
 const GIFT_NAMES = ["お米券", "クオカード", "カタログギフト", "自社製品詰合せ", "お食事券", "図書カード"];
 
@@ -164,6 +177,8 @@ function reset() {
   shakeT = 0; flashRed = 0; overT = 0; deathReason = ""; milestone = 0;
   knifeT = 5; fnT = rand(14, 22);
   trend = "none"; trendLeft = 0;
+  bossActive = false; bossAppeared = false; bossBeaten = false;
+  bossT = 0; bossAtkT = 0; bossAtkFlash = 0; bossDefeatT = 0;
   speed = 248 * chr().speedMul;
   candles.push({ x: -300, w: 850, top: RUN_Y0 + 60, bodyH: 200, bull: true,
                  hiW: 0, loW: 0, vol: 0.5, armed: false, cr: 0, falling: false, dy: 0, fallV: 0, idx: 0 });
@@ -183,7 +198,7 @@ function genCandle() {
     gap = rand(55, 100);
     dy = rand(105, 175);
     crashLeft--;
-  } else if (dist > 1600 && lastTop < 440 && trend === "none" && Math.random() < 0.04) {
+  } else if (dist > 1600 && lastTop < 440 && trend === "none" && !bossActive && Math.random() < 0.04) {
     crashLeft = 2;                           // 急落 → サーキットブレーカー発動
     gap = rand(55, 100);
     dy = rand(105, 175);
@@ -217,7 +232,7 @@ function genCandle() {
   if (trend !== "none") {
     trendLeft -= gap + w;
     if (trendLeft <= 0) trend = "none";
-  } else if (dist > 2200 && crashLeft === 0 && Math.random() < 0.05) {
+  } else if (dist > 2200 && crashLeft === 0 && !bossActive && Math.random() < 0.05) {
     if (Math.random() < 0.5) {
       trend = "golden"; trendLeft = rand(1500, 2300);
       banner("✨ ゴールデンクロス!", "上昇トレンド突入 — コインチャンス!", "#ffd964");
@@ -419,15 +434,15 @@ function update(rawDt) {
       if (c.cr > 0.28 && c.cr < 0.3) sCrumb();
       if (c.cr > 0.62) {
         c.falling = true; c.fallV = 0;
-        puff(c.x + c.w / 2, c.top, 14, "#1ec8d8", c.w / 2, true);
+        puff(c.x + c.w / 2, c.top, 14, c.cursed ? "#c9a7ff" : "#1ec8d8", c.w / 2, true);
         if (player.onGround && player.ground === c) { player.onGround = false; player.coyote = 0.09; }
       }
     }
     if (c.falling) { c.fallV += 2200 * dt; c.dy += c.fallV * dt; }
   }
 
-  // 🔪 落ちてくるナイフ
-  if (dist > 900) {
+  // 🔪 落ちてくるナイフ (ボス戦中は伯爵が投げるので通常発生は停止)
+  if (dist > 900 && !bossActive) {
     knifeT -= dt;
     if (knifeT <= 0) {
       knifeT = rand(3.4, 6.4) - Math.min(1.9, dist / 9000);
@@ -461,8 +476,8 @@ function update(rawDt) {
   }
   knives = knives.filter(k => !(k.stuck && k.stuckT > 1.4) && k.x > camX - 100);
 
-  // 📰 フェイクニュース (視界不良)
-  if (dist > 2600 && fakeT <= 0 && cbT <= 0) {
+  // 📰 フェイクニュース (視界不良) — ボス戦中は発生しない
+  if (dist > 2600 && fakeT <= 0 && cbT <= 0 && !bossActive) {
     fnT -= dt;
     if (fnT <= 0) {
       fnT = rand(14, 22);
@@ -508,6 +523,56 @@ function update(rawDt) {
     }
   }
 
+  // 🧛 ヘッジ伯爵 (自己ベスト更新の瞬間に現れて記録を潰しに来る)
+  const curScore = maxPrice + divTotal;
+  if (!bossAppeared &&
+      (FORCE_BOSS ? dist > 1200
+                  : (dist > 2500 && curScore > Math.max(bestOf(selChar), 6000)))) {
+    bossActive = true; bossAppeared = true;
+    bossT = 18; bossAtkT = 1.4;
+    banner("🧛 ヘッジ伯爵 現る!", "「その記録、空売りで叩き落としてくれよう」", "#c9a7ff");
+    sBossIn();
+  }
+  if (bossActive) {
+    bossT -= dt; bossAtkT -= dt;
+    if (bossAtkT <= 0) {
+      bossAtkT = rand(1.6, 2.7);
+      // 空売り攻撃: 前方の足場をひとつ呪って崩す (隣も崩れる場所は狙わない=理不尽回避)
+      const list = [];
+      for (let i = 1; i < candles.length - 1; i++) {
+        const c = candles[i];
+        if (c.falling || c.armed || c.cursed) continue;
+        if (c.x < player.x + 260 || c.x > player.x + 950) continue;
+        const prev = candles[i - 1], next = candles[i + 1];
+        if (prev && (prev.armed || prev.falling || !prev.bull)) continue;
+        if (next && (next.armed || next.falling || !next.bull)) continue;
+        list.push(c);
+      }
+      if (list.length) {
+        const c = list[Math.floor(Math.random() * list.length)];
+        c.cursed = true; c.armed = true;
+        bossAtkFlash = 0.65;                 // 攻撃ポーズを見せる
+        floatText(c.x + c.w / 2, c.top - 70, "空売りだ!", "#c9a7ff");
+        sCurse();
+      }
+      if (Math.random() < 0.45) {
+        knives.push({ x: player.x + speed * rand(0.8, 1.25), y: 0, vy: 0,
+                      warn: 0.85, stuck: false, stuckT: 0 });
+        sKnife();
+      }
+    }
+    if (bossT <= 0) {
+      // 生き延びた! ショートスクイーズで伯爵退場
+      bossActive = false; bossBeaten = true; bossDefeatT = 1.8;
+      divTotal += 1500;
+      banner("🚀 ショートスクイーズ!", "伯爵は踏み上げられて退場! ボーナス +¥1,500", "#ffd964");
+      floatText(player.x, player.y - 150, "👑 撃退成功!", "#ffd964", true);
+      puff(player.x + 380, camY + 150, 24, "#ffd964", 40, true);
+      trend = "golden"; trendLeft = 1800;
+      sStopHigh();
+    }
+  }
+
   // カメラ
   camX = player.x - 250;
   camY = lerp(camY, player.y - 430, Math.min(1, dt * 2.4));
@@ -540,6 +605,8 @@ function die(reason) {
 function updateFx(dt) {
   if (player) player.squash = lerp(player.squash, 0, Math.min(1, dt * 10));
   shakeT = Math.max(0, shakeT - dt);
+  bossAtkFlash = Math.max(0, bossAtkFlash - dt);
+  bossDefeatT = Math.max(0, bossDefeatT - dt);
   flashRed = Math.max(0, flashRed - dt);
   fakeT = Math.max(0, fakeT - dt);
   for (const p of parts) { p.t += dt; p.x += p.vx * dt; p.y += p.vy * dt; p.vy += 900 * dt; }
@@ -633,6 +700,12 @@ function draw() {
     ctx.fillRect(c.x + shake, top, c.w, 4);
     ctx.strokeStyle = "rgba(255,255,255,0.14)"; ctx.lineWidth = 1.5;
     ctx.strokeRect(c.x + shake, top, c.w, c.bodyH);
+    // 🧛 呪われた足場 (伯爵の空売り)
+    if (c.cursed && !c.falling) {
+      ctx.strokeStyle = "rgba(201,167,255," + (0.55 + Math.sin(tGlobal * 12) * 0.35) + ")";
+      ctx.lineWidth = 4;
+      ctx.strokeRect(c.x + shake - 4, top - 4, c.w + 8, c.bodyH + 8);
+    }
     // 📊 決算予告
     if (c.kessan) {
       ctx.fillStyle = "rgba(255,220,118," + (0.75 + Math.sin(tGlobal * 6) * 0.25) + ")";
@@ -682,6 +755,40 @@ function draw() {
     if (!k.stuck) {
       ctx.strokeStyle = "rgba(255,120,120,0.35)"; ctx.lineWidth = 3;
       ctx.beginPath(); ctx.moveTo(k.x, k.y - 60); ctx.lineTo(k.x, k.y - 18); ctx.stroke();
+    }
+  }
+
+  // 🧛 ヘッジ伯爵 (プレイヤー前方を浮遊 / 敗北時は踏み上げられて吹き飛ぶ)
+  if ((bossActive || bossDefeatT > 0) && state === "play") {
+    const defeat = !bossActive;
+    const rise = defeat ? (1.8 - bossDefeatT) : 0;   // 敗北: 上に吹き飛んでいく
+    const bx = player.x + 380 + rise * 90;
+    const by = camY + 150 + Math.sin(tGlobal * 2.1) * 28 - rise * 320;
+    let frame;
+    if (defeat) frame = "defeat";
+    else if (bossAtkFlash > 0) frame = "attack";
+    else if (bossT < 3.2) frame = Math.floor(tGlobal * 8) % 2 ? "damage" : "idle";   // 踏み上げ間近で苦悶
+    else frame = Math.floor(tGlobal * 4) % 2 ? "walk_1" : "walk_2";
+    const im = bossImgs[frame];
+    ctx.save();
+    ctx.translate(bx, by);
+    ctx.rotate(defeat ? rise * 2.6 : Math.sin(tGlobal * 3.3) * 0.08);
+    ctx.globalAlpha = defeat ? clamp(1.2 - rise / 1.4, 0, 1) : 1;
+    if (im && im.ok) {
+      const h = frame === "attack" ? 210 : 165;      // 攻撃コマは金貨の竜巻ごと大きく
+      const w = h * im.width / im.height;
+      ctx.drawImage(im, -w / 2, -h / 2, w, h);
+    } else {
+      ctx.font = "64px serif"; ctx.textAlign = "center"; ctx.textBaseline = "middle";
+      ctx.fillText("🧛", 0, 0);
+    }
+    ctx.globalAlpha = 1;
+    ctx.restore();
+    if (!defeat) {
+      ctx.fillStyle = "#c9a7ff"; ctx.font = "bold 15px sans-serif"; ctx.textAlign = "center";
+      ctx.fillText("ヘッジ伯爵", bx, by - 92);
+    } else if (Math.random() < 0.3) {
+      puff(bx, by, 2, "#ffd964", 30, false);          // 吹き飛びながら金貨をこぼす
     }
   }
 
@@ -817,6 +924,21 @@ function draw() {
   ctx.fillStyle = COL.dim; ctx.font = "14px sans-serif";
   ctx.fillText("ベスト " + yen(bestOf(selChar)), W - 90, 24);
 
+  // 🧛 伯爵の空売り余力ゲージ
+  if (bossActive && state === "play") {
+    const bw = Math.min(520, W - 300);
+    const bx0 = W / 2 - bw / 2, by0 = 58;
+    ctx.fillStyle = "rgba(7,12,24,0.85)";
+    ctx.fillRect(bx0 - 10, by0 - 8, bw + 20, 36);
+    ctx.strokeStyle = "#c9a7ff"; ctx.lineWidth = 1.5;
+    ctx.strokeRect(bx0 - 10, by0 - 8, bw + 20, 36);
+    ctx.fillStyle = "#6a3fd0";
+    ctx.fillRect(bx0, by0 + 8, bw * clamp(bossT / 18, 0, 1), 10);
+    ctx.fillStyle = "#e6d9ff"; ctx.font = "bold 13px sans-serif";
+    ctx.textAlign = "center"; ctx.textBaseline = "middle";
+    ctx.fillText("🧛 ヘッジ伯爵の空売り余力 — 尽きるまで生き延びろ!", W / 2, by0 + 1);
+  }
+
   // バナー (イベント告知)
   for (const b of banners) {
     const a = b.t < 0.25 ? b.t / 0.25 : (2.4 - b.t) / 0.9;
@@ -928,10 +1050,11 @@ function drawHelp() {
     ["📊", "「決算」の足に乗ると50/50 — ストップ高 or 急落!", "#ffdc76"],
     ["✨", "ゴールデンクロス=ボーナス相場、💀 デッドクロス=下落相場", COL.text],
     ["📰", "フェイクニュース=視界不良。🛑 サーキットブレーカー=スローで救済", "#c9a7ff"],
+    ["🧛", "自己ベスト更新に迫ると…ヘッジ伯爵が空売り攻撃を仕掛けてくる!", "#c9a7ff"],
     ["📉", "落ちたらロスカット。スコア = 高値 + 配当", COL.dim]
   ];
   ctx.textAlign = "left";
-  let y = 158;
+  let y = 156;
   for (const [icon, text, color] of lines) {
     ctx.font = "24px serif";
     ctx.fillStyle = COL.text;
@@ -939,7 +1062,7 @@ function drawHelp() {
     ctx.font = "19px sans-serif";
     ctx.fillStyle = color;
     ctx.fillText(text, px + 78, y);
-    y += 50;
+    y += 46;
   }
   ctx.textAlign = "center";
   if (Math.sin(tGlobal * 4) > -0.3) {
@@ -965,9 +1088,13 @@ function drawOver() {
   ctx.fillText(score >= bestOf(selChar) ? "🎉 " + CHARS[selChar].name + "の自己ベスト更新!" : "", W / 2, 415);
   ctx.fillStyle = COL.dim;
   ctx.fillText(CHARS[selChar].name + " は " + day + " 営業日 生き残った", W / 2, 450);
+  if (bossBeaten) {
+    ctx.fillStyle = "#c9a7ff"; ctx.font = "bold 20px sans-serif";
+    ctx.fillText("👑 ヘッジ伯爵を撃退した!", W / 2, 487);
+  }
   // 🏆 キャラ別ランキング
   ctx.font = "17px sans-serif"; ctx.fillStyle = COL.dim;
-  ctx.fillText("🏆 ベスト記録　モメタン " + yen(bestOf("mometan")) + " ／ イシバシ " + yen(bestOf("ishibashi")), W / 2, 495);
+  ctx.fillText("🏆 ベスト記録　モメタン " + yen(bestOf("mometan")) + " ／ イシバシ " + yen(bestOf("ishibashi")), W / 2, bossBeaten ? 520 : 495);
   if (overT > 0.5) {
     if (Math.sin(tGlobal * 4) > -0.3) {
       ctx.fillStyle = COL.text; ctx.font = "bold 26px sans-serif";
