@@ -11,13 +11,13 @@
 <title>ローソク足ランナー 📈</title>
 <style>
   html, body { height: 100%; margin: 0; background: #05070d; overflow: hidden; }
-  body { display: flex; align-items: center; justify-content: center; }
-  canvas { display: block; touch-action: none; }
-  #rotate { display: none; position: fixed; inset: 0; background: #05070d; color: #cfe3f5;
-    z-index: 10; align-items: center; justify-content: center; font: bold 20px sans-serif; text-align: center; }
-  @media (orientation: portrait) and (max-width: 700px) {
-    #rotate { display: flex; }
-  }
+  canvas { display: block; position: fixed; left: 50%; top: 50%; touch-action: none; transform-origin: 50% 50%; }
+  /* 「横向きにしてね」は画面をふさがない小さな案内にする (タップは下のゲームに通る) */
+  #rotate { position: fixed; left: 50%; bottom: 16px; transform: translateX(-50%);
+    background: rgba(10,18,34,0.88); color: #cfe3f5; padding: 10px 18px; border-radius: 999px;
+    font: bold 15px sans-serif; white-space: nowrap; z-index: 10;
+    opacity: 0; pointer-events: none; transition: opacity .45s; }
+  #rotate.on { opacity: 1; }
 </style>
 </head>
 <body>
@@ -45,17 +45,34 @@ function layoutUI() {
   OVER_SELECT_BTN = { x: W / 2 - 160, y: 610, w: 320, h: 46 };
   HELP_BTN = { x: W - 226, y: 62, w: 196, h: 46 };
 }
+// 縦持ちの狭い画面では、キャンバスごと90度回して画面いっぱいに表示する。
+// アプリ内ブラウザなど「本体を横にしても画面が回らない」環境でも遊べるようにするため。
+const isTouch = matchMedia("(pointer: coarse)").matches || "ontouchstart" in window;
+const rotEl = document.getElementById("rotate");
+let rotated = false, scale = 1, hintTimer = 0;
 function fit() {
+  rotated = isTouch && innerHeight > innerWidth && innerWidth < 700;
+  const availW = rotated ? innerHeight : innerWidth;
+  const availH = rotated ? innerWidth : innerHeight;
   // 画面の縦横比に合わせて描画幅を可変に (横長スマホでも黒帯が出ない)
-  const aspect = innerWidth / Math.max(1, innerHeight);
+  const aspect = availW / Math.max(1, availH);
   W = Math.round(Math.max(1000, Math.min(1760, 720 * aspect)));
   if (cvs.width !== W) cvs.width = W;
   layoutUI();
-  const s = Math.min(innerWidth / W, innerHeight / H);
-  cvs.style.width = (W * s) + "px";
-  cvs.style.height = (H * s) + "px";
+  scale = Math.min(availW / W, availH / H);
+  cvs.style.width = (W * scale) + "px";
+  cvs.style.height = (H * scale) + "px";
+  cvs.style.transform = "translate(-50%, -50%) rotate(" + (rotated ? 90 : 0) + "deg)";
+  if (rotEl) {
+    if (rotated) {
+      rotEl.classList.add("on");
+      clearTimeout(hintTimer);
+      hintTimer = setTimeout(function () { rotEl.classList.remove("on"); }, 4500);
+    } else rotEl.classList.remove("on");
+  }
 }
 addEventListener("resize", fit);
+addEventListener("orientationchange", function () { setTimeout(fit, 150); });
 fit();
 
 // ---------- ユーティリティ ----------
@@ -265,7 +282,12 @@ function genCandle() {
 // ---------- 入力 ----------
 function canvasPos(e) {
   const r = cvs.getBoundingClientRect();
-  return { x: (e.clientX - r.left) * W / r.width, y: (e.clientY - r.top) * H / r.height };
+  const dx = e.clientX - (r.left + r.right) / 2;
+  const dy = e.clientY - (r.top + r.bottom) / 2;
+  // 90度回して表示しているときは、タップ位置も同じだけ回して読み替える
+  const u = rotated ? dy : dx;
+  const v = rotated ? -dx : dy;
+  return { x: u / scale + W / 2, y: v / scale + H / 2 };
 }
 function goFullscreen() {
   // スマホ(タッチ端末)なら全画面表示を試みる
@@ -537,15 +559,18 @@ function update(rawDt) {
     bossT -= dt; bossAtkT -= dt;
     if (bossAtkT <= 0) {
       bossAtkT = rand(1.6, 2.7);
-      // 空売り攻撃: 前方の足場をひとつ呪って崩す (隣も崩れる場所は狙わない=理不尽回避)
+      // 空売り攻撃: 前方の足場をひとつ呪って崩す
+      // 崩れた後の穴がジャンプで越えられる足場だけを狙う (キャラの性能でフェアに)
+      const reach = speed * (chr().airJumps > 0 ? 1.15 : 0.68);
       const list = [];
       for (let i = 1; i < candles.length - 1; i++) {
         const c = candles[i];
         if (c.falling || c.armed || c.cursed) continue;
-        if (c.x < player.x + 260 || c.x > player.x + 950) continue;
+        if (c.x < player.x + 350 || c.x > player.x + 950) continue;
         const prev = candles[i - 1], next = candles[i + 1];
         if (prev && (prev.armed || prev.falling || !prev.bull)) continue;
         if (next && (next.armed || next.falling || !next.bull)) continue;
+        if (next.x - (prev.x + prev.w) > reach) continue;   // 越えられない穴は作らない
         list.push(c);
       }
       if (list.length) {
