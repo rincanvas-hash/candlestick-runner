@@ -9,6 +9,19 @@
 <link rel="apple-touch-icon" href="assets/icon-180.png">
 <link rel="icon" type="image/png" href="assets/icon-180.png">
 <title>ローソク足ランナー 📈</title>
+<meta name="description" content="株価チャートのローソク足の上を走るアクションゲーム。コインを集めてヘッジ伯爵の空売りを踏み上げろ! 無料・登録なし・スマホOK。">
+<!-- SNSでシェアされたときの表示 (OGP) -->
+<meta property="og:type" content="website">
+<meta property="og:title" content="ローソク足ランナー">
+<meta property="og:description" content="チャートの上を走って、ヘッジ伯爵の空売りを踏み上げろ! 無料・登録なし・スマホOK">
+<meta property="og:url" content="https://rincanvas-hash.github.io/candlestick-runner/">
+<meta property="og:image" content="https://rincanvas-hash.github.io/candlestick-runner/assets/ogp.jpg">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="ローソク足ランナー">
+<meta name="twitter:description" content="チャートの上を走って、ヘッジ伯爵の空売りを踏み上げろ! 無料・登録なし・スマホOK">
+<meta name="twitter:image" content="https://rincanvas-hash.github.io/candlestick-runner/assets/ogp.jpg">
 <style>
   html, body { height: 100%; margin: 0; background: #05070d; overflow: hidden; }
   canvas { display: block; position: fixed; left: 50%; top: 50%; touch-action: none; transform-origin: 50% 50%; }
@@ -26,14 +39,17 @@
 <script>
 "use strict";
 // ============================================================
-// ローソク足ランナー v3
+// ローソク足ランナー v4
 // 高度 = 株価。陽線は安全、陰線は崩れる。
 // ナイフを避け、優待を拾い、トレンドを乗りこなせ。
+// v4: カメラ1.3倍ズーム / 地形に「局面」/ オーロラ背景 / 伯爵は「コインで踏み上げる」ボス戦
 // ============================================================
 const cvs = document.getElementById("g");
 const ctx = cvs.getContext("2d");
 let W = 1280;
 const H = 720;
+const Z = 1.3;                 // ワールドのズーム倍率 (キャラ・足場を大きく見せる)
+let VW = W / Z, VH = H / Z;    // 画面に映るワールドの幅・高さ
 let CARD = null, OVER_SELECT_BTN = null, HELP_BTN = null;
 let helpOpen = false;
 
@@ -47,10 +63,10 @@ function layoutUI() {
 }
 // 縦持ちの狭い画面では、キャンバスごと90度回して画面いっぱいに表示する。
 // アプリ内ブラウザなど「本体を横にしても画面が回らない」環境でも遊べるようにするため。
-const isTouch = matchMedia("(pointer: coarse)").matches || "ontouchstart" in window;
 const rotEl = document.getElementById("rotate");
 let rotated = false, scale = 1, hintTimer = 0;
 function fit() {
+  const isTouch = matchMedia("(pointer: coarse)").matches || "ontouchstart" in window;
   rotated = isTouch && innerHeight > innerWidth && innerWidth < 700;
   const availW = rotated ? innerHeight : innerWidth;
   const availH = rotated ? innerWidth : innerHeight;
@@ -58,6 +74,7 @@ function fit() {
   const aspect = availW / Math.max(1, availH);
   W = Math.round(Math.max(1000, Math.min(1760, 720 * aspect)));
   if (cvs.width !== W) cvs.width = W;
+  VW = W / Z; VH = H / Z;
   layoutUI();
   scale = Math.min(availW / W, availH / H);
   cvs.style.width = (W * scale) + "px";
@@ -178,13 +195,16 @@ let player, camX, camY, dist, speed, day, divTotal, maxPrice, milestone;
 let genX, lastTop, crashLeft, shakeT, flashRed, overT, deathReason, tGlobal = 0;
 let knifeT, fnT, fakeT, cbT, trend, trendLeft;
 let bossActive, bossAppeared, bossBeaten, bossT, bossAtkT, bossAtkFlash, bossDefeatT;
+let bossHP, bossIntroT, bossWinT, orbs, bossHitT = 0;   // v4: 伯爵の空売り余力 / 登場演出 / 勝利演出 / 空売り玉 / 被弾表示
+let lives, invT, comboN, comboT, magnetT, mags, nextBossDist, bossRound;   // v4.1: ライフ3 / 無敵時間 / 連続配当 / 📣買い推奨 / 伯爵の再登場
+let phase = { type: "wander", left: 0 };         // v4: 地形の局面 (レンジ・階段・崖・ジグザグ・下り坂)
 // 撮影・テスト用: URLに ?boss=1 を付けると序盤で必ずヘッジ伯爵が出る
 const FORCE_BOSS = new URLSearchParams(location.search).has("boss");
 
 const GIFT_NAMES = ["お米券", "クオカード", "カタログギフト", "自社製品詰合せ", "お食事券", "図書カード"];
 
 function chr() { return CHARS[selChar]; }
-function baseSpeed() { return (248 + (dist / 1000) * 9) * chr().speedMul; }
+function baseSpeed() { return (225 + (dist / 1000) * 9) * chr().speedMul; }   // v4: ズームに合わせて1割ゆっくり
 function banner(text, sub, color) { banners.push({ text, sub, color, t: 0 }); }
 
 function reset() {
@@ -196,25 +216,43 @@ function reset() {
   trend = "none"; trendLeft = 0;
   bossActive = false; bossAppeared = false; bossBeaten = false;
   bossT = 0; bossAtkT = 0; bossAtkFlash = 0; bossDefeatT = 0;
-  speed = 248 * chr().speedMul;
-  candles.push({ x: -300, w: 850, top: RUN_Y0 + 60, bodyH: 200, bull: true,
+  bossHP = 1; bossIntroT = 0; bossWinT = 0; orbs = []; bossHitT = 0;
+  lives = 3; invT = 0; comboN = 0; comboT = 0; magnetT = 0; mags = [];
+  nextBossDist = FORCE_BOSS ? 1200 : 2300; bossRound = 0;        // 約10秒で初登場
+  phase = { type: "wander", left: 0 };
+  speed = 225 * chr().speedMul;
+  candles.push({ x: -300, w: 850, top: RUN_Y0 + 60, bodyH: 200, bull: true, solid: true,
                  hiW: 0, loW: 0, vol: 0.5, armed: false, cr: 0, falling: false, dy: 0, fallV: 0, idx: 0 });
   genX = 550; lastTop = RUN_Y0 + 60;
   player = { x: 60, y: RUN_Y0 + 60, vy: 0, onGround: true, coyote: 0, jumpBuf: 0,
              squash: 0, ground: candles[0], air: chr().airJumps };
-  camX = player.x - 250; camY = player.y - 430;
+  camX = player.x - 260 / Z; camY = player.y - VH * 0.6;
   maxPrice = priceAt(player.y);
-  while (genX < camX + W * 2.5) genCandle();
+  while (genX < camX + VW * 2.5) genCandle();
+}
+
+// 地形の「局面」を選ぶ。高すぎれば下げる局面、低すぎれば上げる局面に寄せる
+function pickPhase() {
+  let types;
+  if (lastTop < 40)        types = ["cliff", "descent", "range", "zigzag"];
+  else if (lastTop > 820)  types = ["stairs", "stairs", "range", "wander"];
+  else if (trend === "golden") types = ["stairs", "wander", "range", "stairs"];
+  else if (trend === "dead")   types = ["descent", "zigzag", "cliff", "range"];
+  else types = ["wander", "range", "stairs", "zigzag", "cliff", "descent", "wander"];
+  const type = types[Math.floor(Math.random() * types.length)];
+  const len = { wander: rand(4, 8), range: rand(3, 6), stairs: rand(3, 6), zigzag: rand(4, 7), cliff: 1, descent: rand(3, 5) }[type];
+  phase = { type, left: Math.round(len) };
 }
 
 // ---------- コース生成 (株価ランダムウォーク + トレンド相場) ----------
 function genCandle() {
   const easing = clamp(dist / 1500, 0, 1);
-  let gap, dy;
+  let gap, dy, wMin = 85, wMax = 155, solid = false;
   if (crashLeft > 0) {                       // 急落中: 下りの陰線が続く
     gap = rand(55, 100);
     dy = rand(105, 175);
     crashLeft--;
+    phase.left = 0;
   } else if (dist > 1600 && lastTop < 440 && trend === "none" && !bossActive && Math.random() < 0.04) {
     crashLeft = 2;                           // 急落 → サーキットブレーカー発動
     gap = rand(55, 100);
@@ -223,20 +261,29 @@ function genCandle() {
     flashRed = 0.9; cbT = 1.9;
     sCB();
   } else {
-    if (trend === "golden")     dy = rand(-100, 12);   // 上昇トレンド
-    else if (trend === "dead")  dy = rand(-20, 95);    // 下降トレンド
-    else                        dy = rand(lerp(-78, -108, easing), 84);
-    const tightness = dy < -60 ? 0.28 : lerp(0.34, 0.44, easing);
+    // 局面ごとに起伏のつけ方を変える。上りは「ジャンプで届く」範囲を守り、下りは大胆に
+    if (phase.left <= 0) pickPhase();
+    phase.left--;
+    let tight = null;
+    switch (phase.type) {
+      case "range":   dy = rand(-40, 40); break;                                   // レンジ相場: 平坦
+      case "stairs":  dy = rand(-100, -55); tight = 0.28; break;                   // 階段上昇
+      case "zigzag":  dy = phase.left % 2 === 0 ? rand(-100, -60) : rand(55, 95); break;
+      case "cliff":   dy = rand(230, 380); wMin = 170; wMax = 240; solid = true; break;   // 崖: 大きく落ちる。着地は崩れない
+      case "descent": dy = rand(40, 100); break;                                   // 下り坂: 陰線が続く
+      default:        dy = rand(lerp(-78, -108, easing), 112);                     // ランダムウォーク (下りは大きめ)
+    }
+    const tightness = tight !== null ? tight : (dy < -60 ? 0.28 : lerp(0.34, 0.44, easing));
     gap = rand(48, clamp(speed * tightness, 85, 220));
   }
   const x = genX + gap;
-  const w = rand(85, 155);
-  const top = clamp(lastTop + dy, 150, 595);
+  const w = rand(wMin, wMax);
+  const top = clamp(lastTop + dy, -300, 1000);
   const bull = top <= lastTop;
   const c = {
     x, w, top,
     bodyH: rand(115, 255),
-    bull,
+    bull, solid,
     hiW: rand(18, 85), loW: rand(18, 85),
     vol: rand(0.15, 1),
     armed: false, cr: 0, falling: false, dy: 0, fallV: 0,
@@ -274,6 +321,10 @@ function genCandle() {
     gifts.push({ x: cx, y: top - rand(105, 175), taken: false, bob: Math.random() * 6 });
   } else if (Math.random() < coinP) {
     coins.push({ x: cx, y: top - rand(100, 185), taken: false, spin: Math.random() * 6 });
+  }
+  // 📣 アナリスト買い推奨 (取ると7秒間コインが寄ってくる)
+  if (trend === "none" && crashLeft === 0 && Math.random() < 0.035) {
+    mags.push({ x: cx + 30, y: top - rand(110, 170), taken: false, bob: Math.random() * 6 });
   }
   genX = x + w;
   lastTop = top;
@@ -373,8 +424,10 @@ function update(rawDt) {
   let ts = 1;
   if (cbT > 0) {
     cbT -= rawDt;
-    ts = cbT > 0.4 ? 0.35 : lerp(1, 0.35, cbT / 0.4);
+    ts = Math.min(ts, cbT > 0.4 ? 0.35 : lerp(1, 0.35, cbT / 0.4));
   }
+  if (bossIntroT > 0) { bossIntroT -= rawDt; ts = Math.min(ts, 0.22); }     // 伯爵登場: 一瞬スロー
+  if (bossWinT > 0) { bossWinT -= rawDt; ts = Math.min(ts, bossWinT > 0.25 ? 0.3 : lerp(1, 0.3, bossWinT / 0.25)); }
   const dt = rawDt * ts;
 
   if (state !== "play") { if (state === "over") overT += rawDt; updateFx(rawDt); return; }
@@ -425,7 +478,7 @@ function update(rawDt) {
     if (!player.onGround) { sLand(); player.squash = 0.3; puff(player.x, player.y, 6, "#7d92ad", 16, false); }
     player.onGround = true; player.ground = landed; player.air = chr().airJumps;
     if (landed.idx > day) day = landed.idx;
-    if (!landed.bull && !landed.armed && landed.idx > 5) landed.armed = true;
+    // v4.2: 陰線の自然崩落は廃止 (崩れるのは伯爵に狙われた足場だけ)。あきこさんの試遊判断。
     // 📊 決算発表!
     if (landed.kessan) {
       landed.kessan = false;
@@ -492,8 +545,15 @@ function update(rawDt) {
     }
     if (k.y > camY + H + 100) k.stuck = true;
     if (!k.stuck && Math.abs(k.x - player.x) < 24 && Math.abs(k.y - (player.y - 26)) < 38) {
-      die("🔪 落ちてくるナイフを掴んでしまった…");
-      return;
+      k.stuck = true; k.stuckT = 9;                    // 当たったナイフは消える
+      if (invT <= 0) {                                 // ライフ制: 即死ではなく ❤️ が1つ減る
+        lives--; invT = 1.4; flashRed = 0.5; shakeT = 0.35;
+        puff(player.x, player.y - 30, 14, "#ff8888", 16, true);
+        beep(200, 70, 0.3, "sawtooth", 0.14);
+        if (lives <= 0) { die("🔪 ナイフでライフが尽きた…"); return; }
+        floatText(player.x, player.y - 120, "🔪 ライフ -1 (のこり " + lives + ")", "#ff8888", true);
+      }
+      continue;
     }
   }
   knives = knives.filter(k => !(k.stuck && k.stuckT > 1.4) && k.x > camX - 100);
@@ -509,15 +569,37 @@ function update(rawDt) {
     }
   }
 
-  // 💰 配当コイン
+  // 💰 配当コイン (伯爵戦中は「買い」= 空売りを踏み上げる)
   for (const co of coins) {
     if (co.taken) continue;
     co.spin += dt * 6;
+    if (co.fall) {                              // 勝利の金貨の雨: 落ちて足場に乗る
+      co.vy += 700 * dt; co.y += co.vy * dt;
+      for (const c of candles) {
+        if (c.falling) continue;
+        const top = c.top + c.dy;
+        if (co.x > c.x && co.x < c.x + c.w && co.y >= top - 16 && co.y <= top + 30) { co.fall = false; co.y = top - 18; break; }
+      }
+      if (co.y > camY + VH + 200) { co.taken = true; continue; }
+    }
+    if (magnetT > 0 && !co.fall) {                // 📣 買い推奨中: コインが寄ってくる
+      const ddx = player.x - co.x, ddy = (player.y - 24) - co.y, d = Math.hypot(ddx, ddy);
+      if (d < 320 && d > 1) { co.x += ddx / d * 520 * dt; co.y += ddy / d * 520 * dt; }
+    }
     if (Math.abs(co.x - player.x) < 32 && Math.abs(co.y - (player.y - 24)) < 42) {
-      co.taken = true; divTotal += 100;
+      co.taken = true;
+      comboN++; comboT = 2.6;                     // 🔥 連続で取ると配当が倍に
+      const mult = comboN >= 12 ? 3 : comboN >= 6 ? 2 : 1;
+      divTotal += 100 * mult;
       sCoin();
-      floatText(co.x, co.y - 10, "+¥100 配当", "#ffd964");
       puff(co.x, co.y, 8, "#ffd964", 8, true);
+      if (comboN === 6 || comboN === 12) floatText(player.x, player.y - 150, "🔥 連続配当 ×" + mult + "!", "#ff9a3a", true);
+      if (bossActive && bossIntroT <= 0) {
+        bossHP = Math.max(0, bossHP - 0.13); bossHitT = 0.45;
+        floatText(co.x, co.y - 10, "買い! 踏み上げ ↑", "#ffd964", true);
+      } else {
+        floatText(co.x, co.y - 10, "+¥" + (100 * mult) + " 配当", "#ffd964");
+      }
     }
   }
   // 🎁 株主優待
@@ -525,11 +607,28 @@ function update(rawDt) {
     if (gf.taken) continue;
     gf.bob += dt * 3;
     if (Math.abs(gf.x - player.x) < 36 && Math.abs(gf.y - (player.y - 24)) < 46) {
-      gf.taken = true; divTotal += 500;
+      gf.taken = true;
       sGift();
-      const name = GIFT_NAMES[Math.floor(Math.random() * GIFT_NAMES.length)];
-      floatText(gf.x, gf.y - 14, "🎁 優待: " + name + " +¥500", "#ff9ee0", true);
+      if (lives < 3) {                                 // ライフが減っていれば優待で回復
+        lives++;
+        floatText(gf.x, gf.y - 14, "🎁 優待でライフ回復 ❤️+1", "#ff9ee0", true);
+      } else {
+        divTotal += 500;
+        const name = GIFT_NAMES[Math.floor(Math.random() * GIFT_NAMES.length)];
+        floatText(gf.x, gf.y - 14, "🎁 優待: " + name + " +¥500", "#ff9ee0", true);
+      }
       puff(gf.x, gf.y, 16, "#ff9ee0", 12, true);
+    }
+  }
+  // 📣 アナリスト買い推奨 (一定時間コインが寄ってくる)
+  for (const m of mags) {
+    if (m.taken) continue;
+    m.bob += dt * 3;
+    if (Math.abs(m.x - player.x) < 36 && Math.abs(m.y - (player.y - 24)) < 46) {
+      m.taken = true; magnetT = 7;
+      floatText(m.x, m.y - 14, "📣 買い推奨! 7秒間コインが集まる", "#7ecbff", true);
+      puff(m.x, m.y, 14, "#7ecbff", 12, true);
+      sStopHigh();
     }
   }
 
@@ -546,70 +645,111 @@ function update(rawDt) {
   }
 
   // 🧛 ヘッジ伯爵 (自己ベスト更新の瞬間に現れて記録を潰しに来る)
-  const curScore = maxPrice + divTotal;
-  if (!bossAppeared &&
-      (FORCE_BOSS ? dist > 1200
-                  : (dist > 2500 && curScore > Math.max(bestOf(selChar), 6000)))) {
-    bossActive = true; bossAppeared = true;
-    bossT = 18; bossAtkT = 1.4;
-    banner("🧛 ヘッジ伯爵 現る!", "「その記録、空売りで叩き落としてくれよう」", "#c9a7ff");
+  // v4: 「耐える」ではなく「コインを取って空売りを踏み上げる」ボス戦
+  // v4.1: 約10秒で初登場し、倒しても約35秒おきに再登場。回を重ねるごとに少し手強くなる
+  if (!bossActive && bossDefeatT <= 0 && dist > nextBossDist) {
+    bossActive = true; bossAppeared = true; bossRound++;
+    bossHP = 1; bossT = 0; bossIntroT = 1.4; bossAtkT = 2.2;
     sBossIn();
   }
   if (bossActive) {
-    bossT -= dt; bossAtkT -= dt;
-    if (bossAtkT <= 0) {
-      bossAtkT = rand(1.6, 2.7);
-      // 空売り攻撃: 前方の足場をひとつ呪って崩す
-      // 崩れた後の穴がジャンプで越えられる足場だけを狙う (キャラの性能でフェアに)
+    bossT += dt;
+    if (bossIntroT <= 0) {
+      bossHP = Math.max(0, bossHP - dt / (34 + bossRound * 5));   // 放っておいても少しずつ減る
+      bossAtkT -= dt;
+    }
+    // 照準中の足場: 照準が終わったら崩壊タイマー始動
+    for (const c of candles) {
+      if (c.aimT > 0) { c.aimT -= dt; if (c.aimT <= 0) { c.armed = true; sCurse(); } }
+    }
+    if (bossAtkT <= 0 && bossIntroT <= 0) {
+      bossAtkT = rand(2.2, 3.4) - Math.min(0.8, (bossRound - 1) * 0.2);   // 自然崩落を無くしたぶん、伯爵の攻撃は少し間隔を空ける
+      // 空売り攻撃: 前方の足場をひとつ狙って崩す。崩れた後の穴がジャンプで越えられる足場だけ (フェアに)
       const reach = speed * (chr().airJumps > 0 ? 1.15 : 0.68);
       const list = [];
       for (let i = 1; i < candles.length - 1; i++) {
         const c = candles[i];
-        if (c.falling || c.armed || c.cursed) continue;
-        if (c.x < player.x + 350 || c.x > player.x + 950) continue;
+        if (c.falling || c.armed || c.cursed || c.solid) continue;
+        if (c.x < player.x + 420 || c.x > player.x + 1000) continue;
         const prev = candles[i - 1], next = candles[i + 1];
         if (prev && (prev.armed || prev.falling || !prev.bull)) continue;
         if (next && (next.armed || next.falling || !next.bull)) continue;
-        if (next.x - (prev.x + prev.w) > reach) continue;   // 越えられない穴は作らない
+        if (next.x - (prev.x + prev.w) > reach) continue;
         list.push(c);
       }
       if (list.length) {
         const c = list[Math.floor(Math.random() * list.length)];
-        c.cursed = true; c.armed = true;
-        bossAtkFlash = 0.65;                 // 攻撃ポーズを見せる
+        c.cursed = true; c.aimT = 1.0;                  // 1秒の照準(光線)→ 崩壊
+        bossAtkFlash = 0.65;
         floatText(c.x + c.w / 2, c.top - 70, "空売りだ!", "#c9a7ff");
-        sCurse();
+        beep(700, 420, 0.2, "sawtooth", 0.08);
       }
-      if (Math.random() < 0.45) {
-        knives.push({ x: player.x + speed * rand(0.8, 1.25), y: 0, vy: 0,
-                      warn: 0.85, stuck: false, stuckT: 0 });
-        sKnife();
+      // 🟣 空売り玉: 当たると配当を失い、伯爵の余力が戻る (即死ではない)
+      if (Math.random() < Math.min(0.9, 0.5 + bossRound * 0.1)) {
+        const bx = player.x + 300, by = camY + 110;
+        const tx = player.x + speed * 0.95, ty = player.y - 20, T = 0.95;
+        orbs.push({ x: bx, y: by, vx: (tx - bx) / T, vy: (ty - by) / T - 0.5 * 900 * T });
+        beep(260, 120, 0.25, "sawtooth", 0.08);
       }
     }
-    if (bossT <= 0) {
-      // 生き延びた! ショートスクイーズで伯爵退場
-      bossActive = false; bossBeaten = true; bossDefeatT = 1.8;
+    for (const o of orbs) {
+      o.vy += 900 * dt; o.x += o.vx * dt; o.y += o.vy * dt;
+      if (Math.abs(o.x - player.x) < 30 && Math.abs(o.y - (player.y - 26)) < 40) {
+        o.dead = true;
+        divTotal = Math.max(0, divTotal - 300);
+        bossHP = Math.min(1, bossHP + 0.12);
+        flashRed = 0.45; shakeT = 0.3;
+        floatText(player.x, player.y - 120, "空売り玉! -¥300", "#c9a7ff", true);
+        puff(player.x, player.y - 30, 12, "#c9a7ff", 16, true);
+        beep(180, 60, 0.3, "sawtooth", 0.14);
+        continue;
+      }
+      for (const c of candles) {
+        if (c.falling) continue;
+        const top = c.top + c.dy;
+        if (o.x > c.x && o.x < c.x + c.w && o.y >= top && o.y <= top + 30) { o.dead = true; puff(o.x, top, 6, "#c9a7ff", 8, true); break; }
+      }
+      if (o.y > camY + VH + 150) o.dead = true;
+    }
+    orbs = orbs.filter(o => !o.dead);
+    if (bossHP <= 0) {
+      // 踏み上げ成功! ショートスクイーズで伯爵退場
+      bossActive = false; bossBeaten = true; bossDefeatT = 1.8; bossWinT = 0.9;
       divTotal += 1500;
       banner("🚀 ショートスクイーズ!", "伯爵は踏み上げられて退場! ボーナス +¥1,500", "#ffd964");
       floatText(player.x, player.y - 150, "👑 撃退成功!", "#ffd964", true);
-      puff(player.x + 380, camY + 150, 24, "#ffd964", 40, true);
+      puff(player.x + 300, camY + 110, 24, "#ffd964", 40, true);
+      for (let i = 0; i < 18; i++) {                   // 金貨の雨 (取れる)
+        coins.push({ x: player.x + rand(80, 560), y: camY - rand(20, 260), vy: rand(60, 220), taken: false, spin: rand(0, 6), fall: true });
+      }
+      orbs = [];
+      nextBossDist = dist + 8500;                      // 約35秒後に再登場
       trend = "golden"; trendLeft = 1800;
       sStopHigh();
     }
   }
 
-  // カメラ
-  camX = player.x - 250;
-  camY = lerp(camY, player.y - 430, Math.min(1, dt * 2.4));
+  // カメラ: 横は固定オフセット、縦はゆっくり追従 (登り下りを体で感じる)。ただしキャラを画面外には出さない
+  camX = player.x - 260 / Z;
+  camY = lerp(camY, player.y - VH * 0.6, Math.min(1, dt * 1.3));
+  camY = Math.max(camY, player.y - VH * 0.88);
+  camY = Math.min(camY, player.y - VH * 0.14);
 
   // 生成 & 掃除
-  while (genX < camX + W * 2) genCandle();
+  while (genX < camX + VW * 2) genCandle();
   while (candles.length && candles[0].x + candles[0].w < camX - 400) candles.shift();
   while (coins.length && coins[0].x < camX - 200) coins.shift();
   while (gifts.length && gifts[0].x < camX - 200) gifts.shift();
+  while (mags.length && mags[0].x < camX - 200) mags.shift();
 
-  // 落下 = ロスカット
-  if (player.y > camY + H + 90) {
+  // 落下 = ロスカット (近くで一番低い足場より、さらに十分下まで落ちたら)
+  let deepest = -Infinity;
+  for (const c of candles) {
+    if (c.falling) continue;
+    if (c.x + c.w > player.x - 250 && c.x < player.x + 700) deepest = Math.max(deepest, c.top + c.dy);
+  }
+  if (deepest === -Infinity) deepest = lastTop;
+  if (player.y > deepest + 330) {
     die("📉 相場から転落してしまった…");
     return;
   }
@@ -632,6 +772,10 @@ function updateFx(dt) {
   shakeT = Math.max(0, shakeT - dt);
   bossAtkFlash = Math.max(0, bossAtkFlash - dt);
   bossDefeatT = Math.max(0, bossDefeatT - dt);
+  bossHitT = Math.max(0, bossHitT - dt);
+  invT = Math.max(0, invT - dt);
+  magnetT = Math.max(0, magnetT - dt);
+  comboT -= dt; if (comboT <= 0) comboN = 0;
   flashRed = Math.max(0, flashRed - dt);
   fakeT = Math.max(0, fakeT - dt);
   for (const p of parts) { p.t += dt; p.x += p.vx * dt; p.y += p.vy * dt; p.vy += 900 * dt; }
@@ -680,26 +824,76 @@ function drawChar(key, x, y, h, frame) {
   }
 }
 
+// 角丸の四角 (古いブラウザでも動くように自前で)
+function rrect(x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y); ctx.arcTo(x + w, y, x + w, y + h, r); ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r); ctx.arcTo(x, y, x + w, y, r); ctx.closePath();
+}
+
+// 🌌 オーロラの夜空: ネイビー〜インディゴをゆっくり往復し、相場の状態で色味が変わる
+function drawSky() {
+  const t = tGlobal;
+  let hue = 224 + Math.sin(t * 0.09) * 16;
+  let sat = 46;
+  let lit = 10 + clamp(((maxPrice || 2000) - 2000) / 6000, 0, 1) * 4;   // 株価が高いほど少し明るい空
+  if (state === "play") {
+    if (trend === "golden")    { hue = 318 + Math.sin(t * 0.12) * 10; sat = 40; lit += 2; }   // 上昇: 暖色寄り
+    else if (trend === "dead") { hue = 206 + Math.sin(t * 0.10) * 6;  sat = 55; lit -= 2; }   // 下降: 冷たい青
+    if (bossActive) { hue = 272; sat = 42; }                                                // 伯爵: 紫
+  }
+  const g = ctx.createLinearGradient(0, 0, 0, H);
+  g.addColorStop(0,    "hsl(" + (hue + 14) + "," + sat + "%," + (lit + 5) + "%)");
+  g.addColorStop(0.55, "hsl(" + hue + "," + sat + "%," + lit + "%)");
+  g.addColorStop(1,    "hsl(" + (hue - 18) + "," + (sat + 6) + "%," + Math.max(4, lit - 4) + "%)");
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+  // オーロラの帯 (3本、ゆっくり波打つ)
+  const bands = [[hue + 120, 0.10, 0.22, 0.6], [hue + 60, 0.08, 0.38, 0.9], [hue + 200, 0.07, 0.30, 1.3]];
+  ctx.globalCompositeOperation = "lighter";
+  for (let i = 0; i < bands.length; i++) {
+    const bh = bands[i][0], alpha = bands[i][1], yc = bands[i][2], spd = bands[i][3];
+    ctx.beginPath();
+    for (let x = 0; x <= W; x += 40) {
+      const y = H * yc + Math.sin(x * 0.0045 + t * spd * 0.5 + i * 2) * 36 + Math.sin(x * 0.0012 - t * 0.3) * 60;
+      if (x === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    }
+    for (let x = W; x >= 0; x -= 40) {
+      ctx.lineTo(x, H * yc + 110 + Math.sin(x * 0.004 + t * spd * 0.4 + i) * 40);
+    }
+    ctx.closePath();
+    ctx.fillStyle = "hsla(" + bh + ",80%,60%," + alpha + ")";
+    ctx.fill();
+  }
+  ctx.globalCompositeOperation = "source-over";
+  // 星
+  ctx.fillStyle = "#ffffff";
+  for (let i = 0; i < 40; i++) {
+    const sx = (i * 197.3) % W, sy = (i * 83.7) % (H * 0.7);
+    ctx.globalAlpha = (0.3 + 0.7 * Math.abs(Math.sin(t * 1.3 + i))) * 0.5;
+    ctx.fillRect(sx, sy, 2, 2);
+  }
+  ctx.globalAlpha = 1;
+}
+
 function draw() {
-  const bg = ctx.createLinearGradient(0, 0, 0, H);
-  bg.addColorStop(0, COL.bg2); bg.addColorStop(1, COL.bg1);
-  ctx.fillStyle = bg; ctx.fillRect(0, 0, W, H);
+  drawSky();
 
   const shX = shakeT > 0 ? rand(-6, 6) * shakeT : 0;
   const shY = shakeT > 0 ? rand(-6, 6) * shakeT : 0;
 
   ctx.save();
-  ctx.translate(-camX + shX, -camY + shY);
+  ctx.scale(Z, Z);                                     // ワールドをズーム (キャラ・足場が大きく)
+  ctx.translate(-camX + shX / Z, -camY + shY / Z);
 
   // グリッド
   ctx.strokeStyle = COL.grid; ctx.lineWidth = 1;
   const gx0 = Math.floor(camX / 160) * 160;
-  for (let gx = gx0; gx < camX + W + 160; gx += 160) {
-    ctx.beginPath(); ctx.moveTo(gx, camY - 40); ctx.lineTo(gx, camY + H + 40); ctx.stroke();
+  for (let gx = gx0; gx < camX + VW + 160; gx += 160) {
+    ctx.beginPath(); ctx.moveTo(gx, camY - 40); ctx.lineTo(gx, camY + VH + 40); ctx.stroke();
   }
   const gy0 = Math.floor(camY / 90) * 90;
-  for (let gy = gy0; gy < camY + H + 90; gy += 90) {
-    ctx.beginPath(); ctx.moveTo(camX - 40, gy); ctx.lineTo(camX + W + 40, gy); ctx.stroke();
+  for (let gy = gy0; gy < camY + VH + 90; gy += 90) {
+    ctx.beginPath(); ctx.moveTo(camX - 40, gy); ctx.lineTo(camX + VW + 40, gy); ctx.stroke();
   }
 
   // 移動平均線 3本
@@ -725,11 +919,18 @@ function draw() {
     ctx.fillRect(c.x + shake, top, c.w, 4);
     ctx.strokeStyle = "rgba(255,255,255,0.14)"; ctx.lineWidth = 1.5;
     ctx.strokeRect(c.x + shake, top, c.w, c.bodyH);
-    // 🧛 呪われた足場 (伯爵の空売り)
+    // 🧛 呪われた足場 (伯爵の空売り): 照準中は伯爵から光線が伸びて、残り秒数が出る
     if (c.cursed && !c.falling) {
       ctx.strokeStyle = "rgba(201,167,255," + (0.55 + Math.sin(tGlobal * 12) * 0.35) + ")";
       ctx.lineWidth = 4;
       ctx.strokeRect(c.x + shake - 4, top - 4, c.w + 8, c.bodyH + 8);
+      if (c.aimT > 0 && bossActive) {
+        ctx.strokeStyle = "rgba(201,167,255,0.7)"; ctx.lineWidth = 2; ctx.setLineDash([10, 8]);
+        ctx.beginPath(); ctx.moveTo(player.x + 300, camY + 110); ctx.lineTo(cx, top); ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.fillStyle = "#c9a7ff"; ctx.font = "bold 16px sans-serif"; ctx.textAlign = "center"; ctx.textBaseline = "bottom";
+        ctx.fillText("⚠ 崩れる", cx, top - 14);
+      }
     }
     // 📊 決算予告
     if (c.kessan) {
@@ -783,16 +984,36 @@ function draw() {
     }
   }
 
+  // 📣 買い推奨アイテム
+  for (const m of mags) {
+    if (m.taken) continue;
+    ctx.save(); ctx.translate(m.x, m.y + Math.sin(m.bob) * 6);
+    ctx.fillStyle = "rgba(126,203,255,0.25)"; ctx.beginPath(); ctx.arc(0, 0, 26, 0, 7); ctx.fill();
+    ctx.font = "34px serif"; ctx.textAlign = "center"; ctx.textBaseline = "middle"; ctx.fillText("📣", 0, 0);
+    ctx.restore();
+  }
+
+  // 🟣 空売り玉 (当たると配当が減る。避けろ)
+  for (const o of orbs) {
+    ctx.strokeStyle = "rgba(201,167,255,0.45)"; ctx.lineWidth = 6; ctx.lineCap = "round";
+    ctx.beginPath(); ctx.moveTo(o.x - o.vx * 0.06, o.y - o.vy * 0.06); ctx.lineTo(o.x, o.y); ctx.stroke();
+    ctx.fillStyle = "rgba(201,167,255,0.35)"; ctx.beginPath(); ctx.arc(o.x, o.y, 20, 0, 7); ctx.fill();
+    ctx.fillStyle = "#8a5cf0"; ctx.beginPath(); ctx.arc(o.x, o.y, 12, 0, 7); ctx.fill();
+    ctx.fillStyle = "#fff"; ctx.font = "bold 12px sans-serif"; ctx.textAlign = "center"; ctx.textBaseline = "middle";
+    ctx.fillText("売", o.x, o.y + 1);
+  }
+  ctx.lineCap = "butt";
+
   // 🧛 ヘッジ伯爵 (プレイヤー前方を浮遊 / 敗北時は踏み上げられて吹き飛ぶ)
-  if ((bossActive || bossDefeatT > 0) && state === "play") {
+  if ((bossActive || bossDefeatT > 0) && state === "play" && bossIntroT <= 0) {
     const defeat = !bossActive;
     const rise = defeat ? (1.8 - bossDefeatT) : 0;   // 敗北: 上に吹き飛んでいく
-    const bx = player.x + 380 + rise * 90;
-    const by = camY + 150 + Math.sin(tGlobal * 2.1) * 28 - rise * 320;
+    const bx = player.x + 300 + rise * 90;
+    const by = camY + 110 + Math.sin(tGlobal * 2.1) * 22 - rise * 300;
     let frame;
     if (defeat) frame = "defeat";
     else if (bossAtkFlash > 0) frame = "attack";
-    else if (bossT < 3.2) frame = Math.floor(tGlobal * 8) % 2 ? "damage" : "idle";   // 踏み上げ間近で苦悶
+    else if (bossHitT > 0 || bossHP < 0.25) frame = Math.floor(tGlobal * 8) % 2 ? "damage" : "idle";   // 踏み上げられて苦悶
     else frame = Math.floor(tGlobal * 4) % 2 ? "walk_1" : "walk_2";
     const im = bossImgs[frame];
     ctx.save();
@@ -800,7 +1021,7 @@ function draw() {
     ctx.rotate(defeat ? rise * 2.6 : Math.sin(tGlobal * 3.3) * 0.08);
     ctx.globalAlpha = defeat ? clamp(1.2 - rise / 1.4, 0, 1) : 1;
     if (im && im.ok) {
-      const h = frame === "attack" ? 210 : 165;      // 攻撃コマは金貨の竜巻ごと大きく
+      const h = frame === "attack" ? 190 : 150;      // 攻撃コマは金貨の竜巻ごと大きく
       const w = h * im.width / im.height;
       ctx.drawImage(im, -w / 2, -h / 2, w, h);
     } else {
@@ -810,8 +1031,8 @@ function draw() {
     ctx.globalAlpha = 1;
     ctx.restore();
     if (!defeat) {
-      ctx.fillStyle = "#c9a7ff"; ctx.font = "bold 15px sans-serif"; ctx.textAlign = "center";
-      ctx.fillText("ヘッジ伯爵", bx, by - 92);
+      ctx.fillStyle = "#c9a7ff"; ctx.font = "bold 15px sans-serif"; ctx.textAlign = "center"; ctx.textBaseline = "alphabetic";
+      ctx.fillText("ヘッジ伯爵", bx, by - 84);
     } else if (Math.random() < 0.3) {
       puff(bx, by, 2, "#ffd964", 30, false);          // 吹き飛びながら金貨をこぼす
     }
@@ -845,7 +1066,9 @@ function draw() {
     const frame = state !== "play" ? "run_1" :
       (!player.onGround ? (player.vy < 0 ? "jump" : "fall")
                         : (Math.floor(tGlobal * 9) % 2 ? "run_1" : "run_2"));
+    if (invT > 0 && Math.floor(tGlobal * 16) % 2) ctx.globalAlpha = 0.35;   // 被弾直後は点滅 (無敵時間)
     drawChar(selChar, 0, 0, chr().h, frame);
+    ctx.globalAlpha = 1;
     ctx.restore();
   }
 
@@ -855,8 +1078,8 @@ function draw() {
   if (fakeT > 0 && state === "play") {
     const a = fakeT > 4.0 ? (4.6 - fakeT) / 0.6 * 0.74 :
               fakeT < 0.7 ? fakeT / 0.7 * 0.74 : 0.74;
-    const px = player.x - camX, py = player.y - camY - 34;
-    const grd = ctx.createRadialGradient(px, py, 95, px, py, 360);
+    const px = (player.x - camX) * Z, py = (player.y - camY) * Z - 34 * Z;
+    const grd = ctx.createRadialGradient(px, py, 110, px, py, 400);
     grd.addColorStop(0, "rgba(4,6,12,0)");
     grd.addColorStop(1, "rgba(4,6,12," + a + ")");
     ctx.fillStyle = grd;
@@ -881,7 +1104,7 @@ function draw() {
   // ナイフの落下予告
   for (const k of knives) {
     if (k.warn <= 0) continue;
-    const sx = k.x - camX;
+    const sx = (k.x - camX) * Z;
     if (sx < 0 || sx > W) continue;
     if (Math.sin(tGlobal * 18) > -0.4) {
       ctx.fillStyle = "#ff5a5a";
@@ -892,11 +1115,11 @@ function draw() {
 
   // 出来高バー
   for (const c of candles) {
-    const vx = c.x - camX;
-    if (vx + c.w < 0 || vx > W) continue;
+    const vx = (c.x - camX) * Z, vw = c.w * Z;
+    if (vx + vw < 0 || vx > W) continue;
     const vh = 18 + c.vol * 52;
     ctx.fillStyle = c.bull ? "rgba(239,61,93,0.26)" : "rgba(30,200,216,0.26)";
-    ctx.fillRect(vx, H - vh, c.w, vh);
+    ctx.fillRect(vx, H - vh, vw, vh);
   }
 
   // 右側の価格軸
@@ -907,13 +1130,13 @@ function draw() {
   ctx.font = "13px sans-serif"; ctx.textAlign = "left"; ctx.textBaseline = "middle";
   ctx.fillStyle = COL.dim;
   const gy0b = Math.floor(camY / 90) * 90;
-  for (let gy = gy0b; gy < camY + H + 90; gy += 90) {
-    const sy = gy - camY;
+  for (let gy = gy0b; gy < camY + VH + 90; gy += 90) {
+    const sy = (gy - camY) * Z;
     if (sy < 60 || sy > H - 14) continue;
     ctx.fillText(priceAt(gy).toLocaleString(), W - 68, sy);
   }
   if (state === "play") {
-    const py = clamp(player.y - camY, 60, H - 16);
+    const py = clamp((player.y - camY) * Z, 60, H - 16);
     ctx.fillStyle = player.vy <= 0 ? COL.bull : COL.bear;
     ctx.fillRect(W - 78, py - 12, 78, 24);
     ctx.fillStyle = "#fff";
@@ -949,7 +1172,18 @@ function draw() {
   ctx.fillStyle = COL.dim; ctx.font = "14px sans-serif";
   ctx.fillText("ベスト " + yen(bestOf(selChar)), W - 90, 24);
 
-  // 🧛 伯爵の空売り余力ゲージ
+  // ❤️ ライフ / 🔥 連続配当 / 📣 買い推奨 (ヘッダー下の左側)
+  if (state === "play") {
+    ctx.textAlign = "left"; ctx.textBaseline = "middle"; ctx.font = "17px sans-serif"; ctx.fillStyle = "#fff";
+    let hs = ""; for (let i = 0; i < 3; i++) hs += i < lives ? "❤️" : "🖤";
+    ctx.fillText(hs, 16, 68);
+    let sx = 100;
+    const mult = comboN >= 12 ? 3 : comboN >= 6 ? 2 : 1;
+    if (mult > 1) { ctx.fillStyle = "#ff9a3a"; ctx.font = "bold 16px sans-serif"; ctx.fillText("🔥 連続配当 ×" + mult, sx, 68); sx += 150; }
+    if (magnetT > 0) { ctx.fillStyle = "#7ecbff"; ctx.font = "bold 16px sans-serif"; ctx.fillText("📣 買い推奨 " + Math.ceil(magnetT) + "s", sx, 68); }
+  }
+
+  // 🧛 伯爵の空売り余力ゲージ (コインを取ると減る = 踏み上げ)
   if (bossActive && state === "play") {
     const bw = Math.min(520, W - 300);
     const bx0 = W / 2 - bw / 2, by0 = 58;
@@ -957,11 +1191,33 @@ function draw() {
     ctx.fillRect(bx0 - 10, by0 - 8, bw + 20, 36);
     ctx.strokeStyle = "#c9a7ff"; ctx.lineWidth = 1.5;
     ctx.strokeRect(bx0 - 10, by0 - 8, bw + 20, 36);
-    ctx.fillStyle = "#6a3fd0";
-    ctx.fillRect(bx0, by0 + 8, bw * clamp(bossT / 18, 0, 1), 10);
+    ctx.fillStyle = "rgba(255,255,255,0.08)"; ctx.fillRect(bx0, by0 + 8, bw, 10);
+    ctx.fillStyle = bossHP < 0.25 ? "#ffb347" : "#6a3fd0";
+    ctx.fillRect(bx0, by0 + 8, bw * clamp(bossHP, 0, 1), 10);
     ctx.fillStyle = "#e6d9ff"; ctx.font = "bold 13px sans-serif";
     ctx.textAlign = "center"; ctx.textBaseline = "middle";
-    ctx.fillText("🧛 ヘッジ伯爵の空売り余力 — 尽きるまで生き延びろ!", W / 2, by0 + 1);
+    ctx.fillText("🧛 伯爵の空売り余力 — 💰コインを取って踏み上げろ! 🟣玉は避けろ", W / 2, by0 + 1);
+  }
+  // 伯爵登場の口上 (スローモーション中にアップで決めゼリフ)
+  if (bossActive && bossIntroT > 0 && state === "play") {
+    ctx.fillStyle = "rgba(10,6,24,0.55)"; ctx.fillRect(0, 0, W, H);
+    // 伯爵は画面中央、吹き出しは右上 → 左にいる自分のキャラを隠さない
+    const im = bossImgs.idle, cx0 = W * 0.50, cy0 = H * 0.58, h = 320;
+    if (im && im.ok) { const w = h * im.width / im.height; ctx.drawImage(im, cx0 - w / 2, cy0 - h / 2, w, h); }
+    else { ctx.font = "160px serif"; ctx.textAlign = "center"; ctx.textBaseline = "middle"; ctx.fillText("🧛", cx0, cy0); }
+    const bxw = Math.min(470, W * 0.40), bxx = W - 78 - 20 - bxw, bxy = 100;
+    ctx.fillStyle = "rgba(255,255,255,0.96)";
+    rrect(bxx, bxy, bxw, 150, 18); ctx.fill();
+    ctx.fillStyle = "#2a1848"; ctx.font = "bold 24px sans-serif"; ctx.textAlign = "left"; ctx.textBaseline = "alphabetic";
+    ctx.fillText(bossRound > 1 ? "🧛 ヘッジ伯爵、再び! (第" + bossRound + "戦)" : "🧛 ヘッジ伯爵 現る!", bxx + 22, bxy + 44);
+    ctx.font = "17px sans-serif"; ctx.fillStyle = "#3a2a5a";
+    ctx.fillText(bossRound > 1 ? "「まだ懲りぬか… 今度こそ叩き落とす」" : "「その記録、空売りで叩き落としてくれよう」", bxx + 22, bxy + 86);
+    ctx.font = "bold 16px sans-serif"; ctx.fillStyle = "#8a5cf0";
+    ctx.fillText("💰 コインを取って空売りを踏み上げろ!", bxx + 22, bxy + 124);
+  }
+  // 勝利の金色フラッシュ
+  if (bossWinT > 0) {
+    ctx.fillStyle = "rgba(255,215,90," + clamp(bossWinT / 0.9, 0, 1) * 0.45 + ")"; ctx.fillRect(0, 0, W, H);
   }
 
   // バナー (イベント告知)
@@ -1009,7 +1265,7 @@ function drawTitle() {
 
   ctx.font = "16px sans-serif";
   ctx.fillStyle = COL.bullLight;
-  ctx.fillText("🟥 陽線=安全 / 🟦 陰線=崩れる", W / 2 - 380, 225);
+  ctx.fillText("🟥 陽線・🟦 陰線 の上を走れ", W / 2 - 380, 225);
   ctx.fillStyle = "#ff8888";
   ctx.fillText("🔪 落ちてくるナイフは掴むな", W / 2, 225);
   ctx.fillStyle = "#ff9ee0";
@@ -1069,13 +1325,13 @@ function drawHelp() {
   const lines = [
     ["🕹️", "タップ / スペースでジャンプ。長押しで大ジャンプ", COL.text],
     ["🐢", "イシバシは空中でもう1回ジャンプできる (2段ジャンプ)", COL.text],
-    ["🟥", "陽線(ピンク)は安全な足場。🟦 陰線(水色)は乗ると崩れる!", COL.bullLight],
-    ["🔪", "落ちてくるナイフに触れたらアウト。床に刺されば無害", "#ff8888"],
-    ["💰", "配当コイン +¥100、🎁 株主優待 +¥500 でスコアUP", COL.gold],
+    ["🟥", "陽線(ピンク)も陰線(水色)も足場。崩れるのは伯爵に狙われた足場だけ(⚠予告つき)", COL.bullLight],
+    ["🔪", "ナイフに当たるとライフ❤️が1つ減る (3つ)。床に刺されば無害。🎁優待で回復", "#ff8888"],
+    ["💰", "配当コイン +¥100。連続で取ると🔥×2・×3! 📣買い推奨でコインが寄ってくる", COL.gold],
     ["📊", "「決算」の足に乗ると50/50 — ストップ高 or 急落!", "#ffdc76"],
     ["✨", "ゴールデンクロス=ボーナス相場、💀 デッドクロス=下落相場", COL.text],
     ["📰", "フェイクニュース=視界不良。🛑 サーキットブレーカー=スローで救済", "#c9a7ff"],
-    ["🧛", "自己ベスト更新に迫ると…ヘッジ伯爵が空売り攻撃を仕掛けてくる!", "#c9a7ff"],
+    ["🧛", "ヘッジ伯爵が現れたら💰コインを取って空売りを踏み上げろ! 🟣玉は避ける", "#c9a7ff"],
     ["📉", "落ちたらロスカット。スコア = 高値 + 配当", COL.dim]
   ];
   ctx.textAlign = "left";
